@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sell an Item — Student Marketplace</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container navigate">
+      <a class="logo" href="index.html">StudentMarket</a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="index.html">Home</a>
+        <a href="sell.html">Sell</a>
+        <a href="jobs.html">Jobs</a>
+        <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+        <a href="about.html">About</a>
+        <a id="auth-link" href="login.html">Login</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <span class="theme-toggle-icon">🌙</span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="container contact-section">
+      <h1>Sell an Item</h1>
+      <p>List your item for fellow students to discover.</p>
+      <form class="contact-form" id="sell-form">
+        <label for="sell-title">Title</label>
+        <input id="sell-title" name="title" type="text" placeholder="e.g. Intro Biology Book" required>
+
+        <label for="sell-price">Price</label>
+        <input id="sell-price" name="price" type="number" min="0" step="0.01" placeholder="0" required>
+
+        <label for="sell-category">Category</label>
+        <input id="sell-category" name="category" type="text" placeholder="Textbooks" required>
+
+        <label for="sell-location">Location</label>
+        <input id="sell-location" name="location" type="text" placeholder="Campus Center" required>
+
+        <label for="sell-description">Description</label>
+        <textarea id="sell-description" name="description" rows="5" placeholder="Describe the item, condition, and pickup details" required></textarea>
+
+        <button type="submit">Publish Listing</button>
+      </form>
+      <p id="sell-status" class="form-status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>© 2026 Student Marketplace</p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

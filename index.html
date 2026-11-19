@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Marketplace</title>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="description" content="Buy and sell with fellow students — textbooks, electronics, furniture and more.">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container navigate">
+            <a class="logo" href="index.html">StudentMarket</a>
+            <nav class="main-nav" aria-label="Main navigation">
+                <a href="index.html">Home</a>
+                <a href="sell.html">Sell</a>
+                <a href="jobs.html">Jobs</a>
+                <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+                <a href="about.html">About</a>
+                <a id="auth-link" href="login.html">Login</a>
+                <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+                    <span class="theme-toggle-icon">🌙</span>
+                    <span class="theme-toggle-text">Dark</span>
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="container hero-inner">
+                <h1>Find great deals from fellow students</h1>
+                <p class="lede">Textbooks, electronics, furniture and more — pick up on campus or nearby.</p>
+                <form class="search" id="search-form" role="search">
+                    <input type="search" id="search-input" name="q" placeholder="Search items, e.g. 'Calculus textbook'" aria-label="Search listings">
+                    <button type="submit">Search</button>
+                </form>
+            </div>
+        </section>
+
+        <section class="container categories">
+            <h2>Categories</h2>
+            <div class="grid categories-grid">
+                <a class="card category" href="index.html?q=Textbooks">Textbooks</a>
+                <a class="card category" href="index.html?q=Electronics">Electronics</a>
+                <a class="card category" href="index.html?q=Furniture">Furniture</a>
+                <a class="card category" href="index.html?q=Clothing">Clothing</a>
+                <a class="card category" href="index.html?q=Services">Services</a>
+                <a class="card category" href="index.html?q=Other">Other</a>
+            </div>
+        </section>
+
+        <section class="container featured">
+            <h2>Featured listings</h2>
+            <div class="grid listings-grid" id="listings-grid"></div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <p>© 2026 Student Marketplace — <a href="about.html#contact">Contact</a> • <a href="terms.html">Terms</a></p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

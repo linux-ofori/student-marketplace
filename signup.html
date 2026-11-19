@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Up — Student Marketplace</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container navigate">
+      <a class="logo" href="index.html">StudentMarket</a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="index.html">Home</a>
+        <a href="sell.html">Sell</a>
+        <a href="jobs.html">Jobs</a>
+        <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+        <a id="auth-link" href="login.html">Login</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <span class="theme-toggle-icon">🌙</span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container auth-shell">
+    <section class="auth-card">
+      <div class="auth-header">
+        <p class="eyebrow">Join the campus community</p>
+        <h1>Create your account</h1>
+      </div>
+
+      <form id="signup-form" class="auth-form">
+        <label for="signup-name">Full name</label>
+        <input id="signup-name" name="name" type="text" placeholder="Jane Doe" required>
+
+        <label for="signup-email">School email</label>
+        <input id="signup-email" name="email" type="email" placeholder="you@student.edu" required>
+
+        <label for="signup-password">Password</label>
+        <input id="signup-password" name="password" type="password" placeholder="Minimum 6 characters" required>
+
+        <label for="signup-role">Role</label>
+        <select id="signup-role" name="role">
+          <option value="student">Student</option>
+          <option value="seller">Seller</option>
+          <option value="buyer">Buyer</option>
+        </select>
+
+        <button type="submit">Create account</button>
+      </form>
+
+      <p class="auth-switch">
+        Already have an account? <a href="login.html">Login</a>
+      </p>
+      <p id="auth-status" class="form-status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>

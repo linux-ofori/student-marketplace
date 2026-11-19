@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About Student Marketplace</title>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="description" content="About Student Marketplace — connect with students to buy and sell items on campus.">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container navigate">
+            <a class="logo" href="index.html">StudentMarket</a>
+            <nav class="main-nav" aria-label="Main navigation">
+                <a href="index.html">Home</a>
+                <a href="sell.html">Sell</a>
+                <a href="jobs.html">Jobs</a>
+                <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+                <a href="about.html">About</a>
+                <a id="auth-link" href="login.html">Login</a>
+                <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+                    <span class="theme-toggle-icon">🌙</span>
+                    <span class="theme-toggle-text">Dark</span>
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="container about-content">
+            <h1>About Student Marketplace</h1>
+            <p>Welcome to Student Marketplace! We are a platform designed to connect students with each other for buying and selling items.</p>
+            <p>Our mission is to make it easy for students to find great deals on textbooks, electronics, furniture, and more — all while staying connected with their campus community.</p>
+        </section>
+
+        <section id="contact" class="container contact-section">
+            <h2>Contact Us</h2>
+            <p>If you have questions, feedback, or need support, send us a message below or email <a href="mailto:support@studentmarket.example">support@studentmarket.example</a>.</p>
+            <form class="contact-form" id="contact-form" method="post">
+                <label for="name">Name</label>
+                <input id="name" name="name" type="text" placeholder="Your name" required>
+
+                <label for="email">Email</label>
+                <input id="email" name="email" type="email" placeholder="you@example.com" required>
+
+                <label for="message">Message</label>
+                <textarea id="message" name="message" rows="5" placeholder="How can we help?" required></textarea>
+
+                <button type="submit">Send message</button>
+            </form>
+            <p id="contact-status" class="form-status" aria-live="polite"></p>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <p>© 2026 Student Marketplace</p>
+            <p><a href="index.html">Home</a> • <a href="sell.html">Sell</a> • <a href="jobs.html">Jobs</a> • <a href="about.html#contact">Contact</a></p>
+            <p class="terms-blurb">By using Student Marketplace you agree to our <a href="terms.html">Terms &amp; Conditions</a>.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

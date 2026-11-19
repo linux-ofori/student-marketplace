@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Student Marketplace</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container navigate">
+      <a class="logo" href="index.html">StudentMarket</a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="index.html">Home</a>
+        <a href="sell.html">Sell</a>
+        <a href="jobs.html">Jobs</a>
+        <a id="dashboard-link" href="dashboard.html">Dashboard</a>
+        <a href="about.html">About</a>
+        <a id="auth-link" href="login.html">Login</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <span class="theme-toggle-icon">🌙</span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container dashboard-page">
+    <section class="dashboard-hero">
+      <div>
+        <p class="eyebrow">Student profile</p>
+        <h1>Welcome back, Student</h1>
+        <p id="dashboard-user-meta" class="meta">Loading profile...</p>
+      </div>
+      <div id="dashboard-role-badges" class="role-badges">
+        <span class="badge badge-seller">Seller</span>
+        <span class="badge badge-buyer">Buyer</span>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <article class="stat-card">
+        <span class="stat-label">Total sales</span>
+        <strong>₵480</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Active listings</span>
+        <strong>6</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Orders placed</span>
+        <strong>12</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Wallet balance</span>
+        <strong>₵210</strong>
+      </article>
+    </section>
+
+    <section class="dashboard-layout">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>My listings</h2>
+          <a href="sell.html">Add new</a>
+        </div>
+        <div id="dashboard-listings" class="list-stack"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Recent activity</h2>
+        </div>
+        <div id="dashboard-activity" class="activity-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>© 2026 Student Marketplace</p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

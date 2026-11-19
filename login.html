@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Student Marketplace</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container navigate">
+      <a class="logo" href="index.html">StudentMarket</a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="index.html">Home</a>
+        <a href="sell.html">Sell</a>
+        <a href="jobs.html">Jobs</a>
+        <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+        <a id="auth-link" href="login.html">Login</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <span class="theme-toggle-icon">🌙</span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container auth-shell">
+    <section class="auth-card">
+      <div class="auth-header">
+        <p class="eyebrow">Welcome back</p>
+        <h1>Login to Student Marketplace</h1>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <label for="login-email">Email</label>
+        <input id="login-email" name="email" type="email" placeholder="you@student.edu" required>
+
+        <label for="login-password">Password</label>
+        <input id="login-password" name="password" type="password" placeholder="Your password" required>
+
+        <button type="submit">Login</button>
+      </form>
+
+      <p class="auth-switch">
+        New here? <a href="signup.html">Create an account</a>
+      </p>
+      <p id="auth-status" class="form-status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
