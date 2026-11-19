@@ -10,12 +10,15 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'student-market-secret';
 
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+const dbPath = process.env.STUDENT_MARKET_DB_PATH
+  ? path.resolve(process.env.STUDENT_MARKET_DB_PATH)
+  : path.join(__dirname, 'data', 'student_marketplace.db');
+
+const dbDir = path.dirname(dbPath);
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'student_marketplace.db');
 const db = new sqlite3.Database(dbPath);
 
 const isStudentEmail = (email) => {
@@ -81,6 +84,13 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+const sellerMiddleware = (req, res, next) => {
+  if (req.user.role !== 'seller') {
+    return res.status(403).json({ message: 'Seller account required.' });
+  }
+  next();
+};
+
 async function initializeDatabase() {
   await runQuery(`
     CREATE TABLE IF NOT EXISTS users (
@@ -133,12 +143,14 @@ async function initializeDatabase() {
     )
   `);
 
+  await runQuery("UPDATE users SET role = 'buyer' WHERE role = 'student'");
+
   const userCount = await getQuery('SELECT COUNT(*) AS total FROM users');
   if (!userCount || userCount.total === 0) {
     const demoHash = await bcrypt.hash('student123', 10);
     await runQuery(
       'INSERT INTO users (name, email, password_hash, role, student_verified) VALUES (?, ?, ?, ?, ?)',
-      ['Demo Student', 'demo@studentmarket.com', demoHash, 'student', 1]
+      ['Demo Student', 'demo@studentmarket.com', demoHash, 'buyer', 1]
     );
   }
 
@@ -222,6 +234,10 @@ app.post('/api/auth/signup', async (req, res) => {
     return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
   }
 
+  if (role !== 'buyer' && role !== 'seller') {
+    return res.status(400).json({ message: 'Role must be either buyer or seller.' });
+  }
+
   try {
     const existingUser = await getQuery('SELECT id FROM users WHERE email = ?', [normalizedEmail]);
     if (existingUser) {
@@ -232,7 +248,7 @@ app.post('/api/auth/signup', async (req, res) => {
     const studentVerified = isStudentEmail(normalizedEmail) ? 1 : 0;
     const newUser = await runQuery(
       'INSERT INTO users (name, email, password_hash, role, student_verified) VALUES (?, ?, ?, ?, ?)',
-      [normalizedName, normalizedEmail, passwordHash, role || 'student', studentVerified]
+      [normalizedName, normalizedEmail, passwordHash, role, studentVerified]
     );
 
     const user = await getQuery('SELECT * FROM users WHERE id = ?', [newUser.id]);
@@ -281,6 +297,41 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/users/me', authMiddleware, async (req, res) => {
   res.json({ user: getUserSafe(req.user) });
+});
+
+app.post('/api/users/me/upgrade-to-seller', authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role === 'seller') {
+      const token = createToken(req.user);
+      return res.json({
+        message: 'Your account is already a Seller account.',
+        token,
+        user: getUserSafe(req.user)
+      });
+    }
+
+    if (req.user.role === 'student') {
+      await runQuery("UPDATE users SET role = 'buyer' WHERE id = ?", [req.user.id]);
+      req.user.role = 'buyer';
+    }
+
+    if (req.user.role !== 'buyer') {
+      return res.status(409).json({ message: 'Unsupported account role; upgrade was not performed.' });
+    }
+
+    await runQuery("UPDATE users SET role = 'seller' WHERE id = ?", [req.user.id]);
+    const updatedUser = await getQuery('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    const token = createToken(updatedUser);
+
+    return res.json({
+      message: 'Account upgraded to Seller successfully.',
+      token,
+      user: getUserSafe(updatedUser)
+    });
+  } catch (error) {
+    console.error('Seller upgrade error:', error);
+    return res.status(500).json({ message: 'Could not upgrade account.' });
+  }
 });
 
 app.get('/api/dashboard', authMiddleware, async (req, res) => {
@@ -376,7 +427,7 @@ app.get('/api/listings/:id', async (req, res) => {
   }
 });
 
-app.post('/api/listings', authMiddleware, async (req, res) => {
+app.post('/api/listings', authMiddleware, sellerMiddleware, async (req, res) => {
   const { title, description, category, price, condition, deliveryMode, location } = req.body || {};
 
   if (!title || !description || !category || !price || !condition) {
@@ -407,7 +458,7 @@ app.post('/api/listings', authMiddleware, async (req, res) => {
   }
 });
 
-app.put('/api/listings/:id', authMiddleware, async (req, res) => {
+app.put('/api/listings/:id', authMiddleware, sellerMiddleware, async (req, res) => {
   const { id } = req.params;
   const { title, description, category, price, condition, deliveryMode, location, status } = req.body || {};
 
@@ -446,7 +497,7 @@ app.put('/api/listings/:id', authMiddleware, async (req, res) => {
   }
 });
 
-app.delete('/api/listings/:id', authMiddleware, async (req, res) => {
+app.delete('/api/listings/:id', authMiddleware, sellerMiddleware, async (req, res) => {
   const { id } = req.params;
 
   try {

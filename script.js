@@ -47,14 +47,46 @@ function initThemeToggle() {
   });
 }
 
+async function getCurrentUser() {
+  const token = localStorage.getItem('student-market-token');
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`${API_BASE}/users/me`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await response.json();
+
+    if (response.status === 401) {
+      localStorage.removeItem('student-market-token');
+      localStorage.removeItem('student-market-user');
+      return null;
+    }
+
+    if (!response.ok) return null;
+
+    if (data.user) {
+      localStorage.setItem('student-market-user', JSON.stringify(data.user));
+    }
+    return data.user || null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function updateAuthNav() {
   const authLink = document.getElementById('auth-link');
   const dashboardLink = document.getElementById('dashboard-link');
+  const sellerLinks = document.querySelectorAll('a[href="sell.html"]');
   const token = localStorage.getItem('student-market-token');
 
   if (dashboardLink) {
     dashboardLink.classList.toggle('hidden-when-logged-out', !token);
   }
+
+  sellerLinks.forEach((link) => {
+    link.classList.add('hidden-when-logged-out');
+  });
 
   if (!authLink) return;
 
@@ -68,8 +100,18 @@ function updateAuthNav() {
       if (dashboardLink) {
         dashboardLink.classList.add('hidden-when-logged-out');
       }
+      sellerLinks.forEach((link) => {
+        link.classList.add('hidden-when-logged-out');
+      });
       window.location.href = 'index.html';
     };
+
+    getCurrentUser().then((user) => {
+      const isSeller = user?.role === 'seller';
+      sellerLinks.forEach((link) => {
+        link.classList.toggle('hidden-when-logged-out', !isSeller);
+      });
+    });
   } else {
     authLink.textContent = 'Login';
     authLink.href = 'login.html';
@@ -307,6 +349,20 @@ async function loadDashboardContent() {
       headers: { Authorization: `Bearer ${token}` }
     });
 
+    if (response.status === 401) {
+      localStorage.removeItem('student-market-token');
+      localStorage.removeItem('student-market-user');
+      if (listingContainer) listingContainer.innerHTML = '';
+      if (activityContainer) activityContainer.innerHTML = '';
+      if (roleBadges) roleBadges.innerHTML = '';
+      const addListingLink = document.getElementById('dashboard-add-listing');
+      if (addListingLink) addListingLink.classList.add('hidden-when-logged-out');
+      const existingUpgrade = document.getElementById('become-seller-action');
+      if (existingUpgrade) existingUpgrade.remove();
+      window.location.href = 'login.html';
+      return;
+    }
+
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.message || 'Dashboard fetch failed');
@@ -329,11 +385,36 @@ async function loadDashboardContent() {
     }
 
     if (roleBadges) {
-      const role = (safeUser?.role || 'student').toLowerCase();
-      roleBadges.innerHTML = `
-        <span class="badge badge-seller">${role === 'seller' ? 'Seller' : 'Student'}</span>
-        <span class="badge badge-buyer">Buyer</span>
-      `;
+      const role = String(safeUser?.role || '').toLowerCase();
+      roleBadges.innerHTML = role === 'seller'
+        ? '<span class="badge badge-seller">Seller</span>'
+        : role === 'buyer'
+          ? '<span class="badge badge-buyer">Buyer</span>'
+          : '';
+    }
+
+    const addListingLink = document.getElementById('dashboard-add-listing');
+    if (addListingLink) {
+      addListingLink.classList.toggle('hidden-when-logged-out', safeUser?.role !== 'seller');
+    }
+
+    const existingUpgrade = document.getElementById('become-seller-action');
+    if (existingUpgrade) existingUpgrade.remove();
+
+    if (safeUser?.role === 'buyer') {
+      const hero = document.querySelector('.dashboard-hero');
+      if (hero) {
+        const upgradeSection = document.createElement('div');
+        upgradeSection.className = 'role-badges';
+        upgradeSection.id = 'become-seller-action';
+        upgradeSection.innerHTML = `
+          <button type="button" class="badge badge-seller" id="upgrade-seller-button">Become a Seller</button>
+          <span id="upgrade-seller-status" class="form-status" aria-live="polite"></span>
+        `;
+        hero.appendChild(upgradeSection);
+
+        document.getElementById('upgrade-seller-button')?.addEventListener('click', handleUpgradeToSeller);
+      }
     }
 
     if (totalSalesElement) totalSalesElement.textContent = formatCurrency(stats.totalSales || 0);
@@ -366,30 +447,112 @@ async function loadDashboardContent() {
   }
 }
 
+async function handleUpgradeToSeller(event) {
+  event.preventDefault();
+  const button = event.currentTarget;
+  const status = document.getElementById('upgrade-seller-status');
+  const token = localStorage.getItem('student-market-token');
+
+  if (!token) {
+    window.location.href = 'login.html';
+    return;
+  }
+
+  if (button) button.disabled = true;
+
+  try {
+    const response = await fetch(`${API_BASE}/users/me/upgrade-to-seller`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await response.json();
+
+    if (response.status === 401) {
+      localStorage.removeItem('student-market-token');
+      localStorage.removeItem('student-market-user');
+      window.location.href = 'login.html';
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Unable to upgrade account.');
+    }
+
+    if (data.token) {
+      localStorage.setItem('student-market-token', data.token);
+    }
+    if (data.user) {
+      localStorage.setItem('student-market-user', JSON.stringify(data.user));
+    }
+
+    if (status) {
+      status.textContent = data.message || 'Account upgraded to Seller.';
+      status.style.color = '#166534';
+    }
+
+    updateAuthNav();
+    await loadDashboardContent();
+  } catch (error) {
+    if (status) {
+      status.textContent = error.message || 'Unable to upgrade account.';
+      status.style.color = '#b91c1c';
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function handleSellSubmit(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const status = document.getElementById('sell-status');
   if (!status) return;
 
+  const token = localStorage.getItem('student-market-token');
+  if (!token) {
+    window.location.href = 'login.html';
+    return;
+  }
+
+  const priceText = form.price.value.trim();
+  const price = Number(priceText);
+  if (!priceText || !Number.isFinite(price) || price <= 0) {
+    status.textContent = 'Enter a valid price greater than 0.';
+    status.style.color = '#b91c1c';
+    form.price.focus();
+    return;
+  }
+
   const payload = {
     title: form.title.value.trim(),
-    price: Number(form.price.value),
+    price,
     category: form.category.value.trim(),
     location: form.location.value.trim(),
     description: form.description.value.trim(),
-    condition: 'Good',
-    deliveryMode: 'pickup'
+    condition: form.condition.value,
+    deliveryMode: form.deliveryMode.value
   };
 
   try {
     const response = await fetch(`${API_BASE}/listings`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
       body: JSON.stringify(payload)
     });
 
     const data = await response.json();
+    if (response.status === 401) {
+      localStorage.removeItem('student-market-token');
+      localStorage.removeItem('student-market-user');
+      window.location.href = 'login.html';
+      return;
+    }
+    if (response.status === 403) {
+      throw new Error(data.message || 'A Seller account is required to create listings.');
+    }
     if (!response.ok) {
       throw new Error(data.message || 'Listing failed');
     }
@@ -416,7 +579,24 @@ function initPage() {
 
   const sellForm = document.getElementById('sell-form');
   if (sellForm) {
-    sellForm.addEventListener('submit', handleSellSubmit);
+    const token = localStorage.getItem('student-market-token');
+    if (!token) {
+      window.location.href = 'login.html';
+    } else {
+      getCurrentUser().then((user) => {
+        if (!user) {
+          window.location.href = 'login.html';
+          return;
+        }
+        if (user.role !== 'seller') {
+          sellForm.hidden = true;
+          const status = document.getElementById('sell-status');
+          if (status) status.textContent = 'A Seller account is required to create listings.';
+          return;
+        }
+        sellForm.addEventListener('submit', handleSellSubmit);
+      });
+    }
   }
 
   const loginForm = document.getElementById('login-form');

@@ -12,7 +12,7 @@
       <a class="logo" href="index.html">StudentMarket</a>
       <nav class="main-nav" aria-label="Main navigation">
         <a href="index.html">Home</a>
-        <a href="sell.html">Sell</a>
+        <a id="seller-nav-link" href="sell.html" class="hidden-when-logged-out">Sell</a>
         <a href="jobs.html">Jobs</a>
         <a id="dashboard-link" href="dashboard.html">Dashboard</a>
         <a href="about.html">About</a>
@@ -32,10 +32,7 @@
         <h1>Welcome back, Student</h1>
         <p id="dashboard-user-meta" class="meta">Loading profile...</p>
       </div>
-      <div id="dashboard-role-badges" class="role-badges">
-        <span class="badge badge-seller">Seller</span>
-        <span class="badge badge-buyer">Buyer</span>
-      </div>
+      <div id="dashboard-role-badges" class="role-badges"></div>
     </section>
 
     <section class="stats-grid">
@@ -61,7 +58,7 @@
       <div class="panel">
         <div class="panel-header">
           <h2>My listings</h2>
-          <a href="sell.html">Add new</a>
+          <a id="dashboard-add-listing" href="sell.html" class="hidden-when-logged-out">Add new</a>
         </div>
         <div id="dashboard-listings" class="list-stack"></div>
       </div>

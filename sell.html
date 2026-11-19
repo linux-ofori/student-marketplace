@@ -12,7 +12,7 @@
       <a class="logo" href="index.html">StudentMarket</a>
       <nav class="main-nav" aria-label="Main navigation">
         <a href="index.html">Home</a>
-        <a href="sell.html">Sell</a>
+        <a id="seller-nav-link" href="sell.html" class="hidden-when-logged-out">Sell</a>
         <a href="jobs.html">Jobs</a>
         <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
         <a href="about.html">About</a>
@@ -34,10 +34,24 @@
         <input id="sell-title" name="title" type="text" placeholder="e.g. Intro Biology Book" required>
 
         <label for="sell-price">Price</label>
-        <input id="sell-price" name="price" type="number" min="0" step="0.01" placeholder="0" required>
+        <input id="sell-price" name="price" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required>
 
         <label for="sell-category">Category</label>
         <input id="sell-category" name="category" type="text" placeholder="Textbooks" required>
+
+        <label for="sell-condition">Condition</label>
+        <select id="sell-condition" name="condition" required>
+          <option value="Excellent">Excellent</option>
+          <option value="Good" selected>Good</option>
+          <option value="Fair">Fair</option>
+          <option value="Poor">Poor</option>
+        </select>
+
+        <label for="sell-delivery-mode">Delivery mode</label>
+        <select id="sell-delivery-mode" name="deliveryMode" required>
+          <option value="pickup" selected>Campus pickup</option>
+          <option value="delivery">Delivery</option>
+        </select>
 
         <label for="sell-location">Location</label>
         <input id="sell-location" name="location" type="text" placeholder="Campus Center" required>
