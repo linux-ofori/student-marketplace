@@ -35,22 +35,44 @@
                     <input type="search" id="search-input" name="q" placeholder="Search items, e.g. 'Calculus textbook'" aria-label="Search listings">
                     <button type="submit">Search</button>
                 </form>
+                <div class="marketplace-filters" aria-label="Marketplace filters">
+                    <label for="category-filter">
+                        Category
+                        <select id="category-filter" name="category">
+                            <option value="All">All categories</option>
+                            <option value="Textbooks">Textbooks</option>
+                            <option value="Electronics">Electronics</option>
+                            <option value="Furniture">Furniture</option>
+                            <option value="Clothing">Clothing</option>
+                            <option value="Services">Services</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </label>
+                    <label for="sort-filter">
+                        Sort
+                        <select id="sort-filter" name="sort">
+                            <option value="newest">Newest first</option>
+                            <option value="lowest">Lowest price first</option>
+                            <option value="highest">Highest price first</option>
+                        </select>
+                    </label>
+                </div>
             </div>
         </section>
 
         <section class="container categories">
             <h2>Categories</h2>
             <div class="grid categories-grid">
-                <a class="card category" href="index.html?q=Textbooks">Textbooks</a>
-                <a class="card category" href="index.html?q=Electronics">Electronics</a>
-                <a class="card category" href="index.html?q=Furniture">Furniture</a>
-                <a class="card category" href="index.html?q=Clothing">Clothing</a>
-                <a class="card category" href="index.html?q=Services">Services</a>
-                <a class="card category" href="index.html?q=Other">Other</a>
+                <a class="card category" href="index.html?category=Textbooks">Textbooks</a>
+                <a class="card category" href="index.html?category=Electronics">Electronics</a>
+                <a class="card category" href="index.html?category=Furniture">Furniture</a>
+                <a class="card category" href="index.html?category=Clothing">Clothing</a>
+                <a class="card category" href="index.html?category=Services">Services</a>
+                <a class="card category" href="index.html?category=Other">Other</a>
             </div>
         </section>
 
-        <section class="container featured">
+        <section class="container featured" id="featured-listings">
             <h2>Featured listings</h2>
             <div class="grid listings-grid" id="listings-grid"></div>
         </section>

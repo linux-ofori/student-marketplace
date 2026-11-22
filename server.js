@@ -290,6 +290,28 @@ const listingFieldLimits = {
 const listingConditions = new Set(['Excellent', 'Good', 'Fair', 'Poor']);
 const listingDeliveryModes = new Set(['pickup', 'delivery']);
 const listingStatuses = new Set(['active', 'sold']);
+const publicListingSorts = {
+  newest: 'l.created_at DESC, l.id DESC',
+  lowest: 'l.price ASC, l.id ASC',
+  highest: 'l.price DESC, l.id DESC'
+};
+
+function getPublicListing(listing) {
+  if (!listing) return null;
+  return {
+    id: listing.id,
+    title: listing.title,
+    description: listing.description,
+    category: listing.category,
+    price: listing.price,
+    condition: listing.condition,
+    delivery_mode: listing.delivery_mode,
+    location: listing.location,
+    status: listing.status,
+    created_at: listing.created_at,
+    seller_name: listing.seller_name
+  };
+}
 
 function validateListingInput(input, partial = false) {
   const errors = [];
@@ -677,15 +699,24 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/listings', async (req, res) => {
-  const { q = '', category = '', status = 'active' } = req.query;
+  const { q = '', category = '', sort = 'newest' } = req.query;
+  const sortFragment = publicListingSorts[String(sort)];
+
+  if (!sortFragment) {
+    return res.status(400).json({
+      message: 'Invalid sort option.',
+      allowedSorts: ['newest', 'lowest', 'highest']
+    });
+  }
 
   let sql = `
-    SELECT l.*, u.name AS seller_name
+    SELECT l.id, l.title, l.description, l.category, l.price, l.condition,
+           l.delivery_mode, l.location, l.status, l.created_at, u.name AS seller_name
     FROM listings l
     JOIN users u ON u.id = l.user_id
-    WHERE l.status = ?
+    WHERE l.status = 'active'
   `;
-  const params = [status];
+  const params = [];
 
   if (q) {
     sql += ' AND (LOWER(l.title) LIKE ? OR LOWER(l.description) LIKE ? OR LOWER(l.category) LIKE ?)';
@@ -698,11 +729,11 @@ app.get('/api/listings', async (req, res) => {
     params.push(String(category).toLowerCase());
   }
 
-  sql += ' ORDER BY l.created_at DESC';
+  sql += ` ORDER BY ${sortFragment}`;
 
   try {
     const listings = await allQuery(sql, params);
-    res.json({ listings });
+    res.json({ listings: listings.map(getPublicListing) });
   } catch (error) {
     console.error('List listings error:', error);
     res.status(500).json({ message: 'Could not fetch listings.' });
@@ -714,7 +745,8 @@ app.get('/api/listings/:id', async (req, res) => {
 
   try {
     const listing = await getQuery(
-      `SELECT l.*, u.name AS seller_name
+      `SELECT l.id, l.title, l.description, l.category, l.price, l.condition,
+              l.delivery_mode, l.location, l.status, l.created_at, u.name AS seller_name
        FROM listings l
        JOIN users u ON u.id = l.user_id
        WHERE l.id = ?`,
@@ -725,7 +757,7 @@ app.get('/api/listings/:id', async (req, res) => {
       return res.status(404).json({ message: 'Listing not found.' });
     }
 
-    return res.json({ listing });
+    return res.json({ listing: getPublicListing(listing) });
   } catch (error) {
     console.error('Get listing error:', error);
     return res.status(500).json({ message: 'Could not fetch listing.' });

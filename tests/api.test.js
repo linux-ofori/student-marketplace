@@ -544,10 +544,124 @@ async function run() {
   });
   assert(crossDelete.status === 403, "Seller could delete another user's listing");
 
+  await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [seller.body.user.id, 'Calculus Workbook', 'Practice equations and worked solutions', 'Textbooks', 20, 'Good', 'pickup', 'Campus', 'active', '2026-01-02 10:00:00']
+  );
+  await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Portable Study Laptop', 'A portable computer for campus work', 'Electronics', 20, 'Excellent', 'delivery', 'Library', 'active', '2026-01-02 10:00:00']
+  );
+  await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Campus Electronics Kit', 'A campus electronics kit for student study', 'Electronics', 10, 'Good', 'pickup', 'Campus', 'active', '2026-01-03 10:00:00']
+  );
+  await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Sold Study Desk', 'A desk that has already been sold', 'Furniture', 500, 'Fair', 'pickup', 'Campus', 'sold', '2026-01-01 10:00:00']
+  );
+
   const publicListings = await request('/api/listings');
   assert(publicListings.status === 200, 'Public listings browse failed');
+  assert(publicListings.body.listings.every((item) => item.status === 'active'), 'Public browse returned a sold listing');
+
+  const titleSearch = await request('/api/listings?q=calculus');
+  assert(titleSearch.status === 200, 'Title search failed');
+  assert(titleSearch.body.listings.some((item) => item.title === 'Calculus Workbook'), 'Title search did not match the title');
+
+  const descriptionSearch = await request('/api/listings?q=PORTABLE');
+  assert(descriptionSearch.status === 200, 'Description search failed');
+  assert(descriptionSearch.body.listings.some((item) => item.description.includes('portable')), 'Case-insensitive description search did not match');
+
+  const categorySearch = await request('/api/listings?q=ELECTRONICS');
+  assert(categorySearch.status === 200, 'Category search failed');
+  assert(categorySearch.body.listings.some((item) => item.category === 'Electronics'), 'Search did not match category text');
+
+  const exactCategory = await request('/api/listings?category=Textbooks');
+  assert(exactCategory.status === 200, 'Category filtering failed');
+  assert(exactCategory.body.listings.every((item) => item.category.toLowerCase() === 'textbooks'), 'Category filter returned a different category');
+  const caseInsensitiveCategory = await request('/api/listings?category=textbooks');
+  assert(caseInsensitiveCategory.status === 200, 'Case-insensitive category filtering failed');
+  assert(caseInsensitiveCategory.body.listings.every((item) => item.category.toLowerCase() === 'textbooks'), 'Case-insensitive category filter returned a different category');
+
+  const combinedFilter = await request('/api/listings?q=campus&category=Electronics');
+  assert(combinedFilter.status === 200, 'Combined search and category filtering failed');
+  assert(combinedFilter.body.listings.every((item) => item.category === 'Electronics'), 'Combined filter ignored category');
+  assert(combinedFilter.body.listings.some((item) => item.title === 'Portable Study Laptop'), 'Combined filter did not match search and category together');
+
+  const combinedSortFilter = await request('/api/listings?q=campus&category=Electronics&sort=lowest');
+  assert(combinedSortFilter.status === 200, 'Combined search, category, and sorting failed');
+  assert(combinedSortFilter.body.listings.every((item) => item.category === 'Electronics'), 'Combined sorting filter ignored category');
+  assert(combinedSortFilter.body.listings.some((item) => item.title === 'Campus Electronics Kit'), 'Combined sorting filter ignored search');
+  assert(combinedSortFilter.body.listings.every((item, index, items) =>
+    index === 0 || items[index - 1].price <= item.price
+  ), 'Combined sorting filter did not apply lowest-price sorting');
+
+  const lowestSort = await request('/api/listings?sort=lowest');
+  assert(lowestSort.status === 200, 'Lowest-price sort failed');
+  assert(lowestSort.body.listings.every((item, index, items) =>
+    index === 0 || items[index - 1].price <= item.price
+  ), 'Lowest-price sort was not ascending');
+  const lowestTieItems = lowestSort.body.listings.filter((item) => item.price === 20);
+  assert(lowestTieItems.length >= 2 &&
+    lowestTieItems[0].id < lowestTieItems[1].id, 'Equal-price results were not deterministic');
+
+  const highestSort = await request('/api/listings?sort=highest');
+  assert(highestSort.status === 200, 'Highest-price sort failed');
+  assert(highestSort.body.listings.every((item, index, items) =>
+    index === 0 || items[index - 1].price >= item.price
+  ), 'Highest-price sort was not descending');
+  const highestTieItems = highestSort.body.listings.filter((item) => item.price === 20);
+  assert(highestTieItems.length >= 2 &&
+    highestTieItems[0].id > highestTieItems[1].id, 'Equal-price highest-price results were not deterministic');
+
+  const newestSort = await request('/api/listings?sort=newest');
+  assert(newestSort.status === 200, 'Newest sort failed');
+  assert(newestSort.body.listings.every((item, index, items) =>
+    index === 0 || items[index - 1].created_at >= item.created_at
+  ), 'Newest sort was not descending');
+  const newestTieItems = newestSort.body.listings.filter((item) => item.created_at === '2026-01-02 10:00:00');
+  assert(newestTieItems.length >= 2 &&
+    newestTieItems[0].id > newestTieItems[1].id, 'Equal-date results were not deterministic');
+
+  for (const invalidSortValue of ['price_random', 'lowest-price', 'highest-price', 'price-asc', 'price-desc']) {
+    const invalidSort = await request(`/api/listings?sort=${encodeURIComponent(invalidSortValue)}`);
+    assert(invalidSort.status === 400, `Invalid sort '${invalidSortValue}' did not return HTTP 400`);
+  }
+
+  const expectedPublicKeys = [
+    'category',
+    'condition',
+    'created_at',
+    'delivery_mode',
+    'description',
+    'id',
+    'location',
+    'price',
+    'seller_name',
+    'status',
+    'title'
+  ];
+  assert(publicListings.body.listings.every((item) =>
+    JSON.stringify(Object.keys(item).sort()) === JSON.stringify(expectedPublicKeys)
+  ), 'Public listings did not return the exact public DTO key set');
+  assert(publicListings.body.listings.every((item) =>
+    !Object.prototype.hasOwnProperty.call(item, 'user_id') &&
+    !Object.prototype.hasOwnProperty.call(item, 'email') &&
+    !Object.prototype.hasOwnProperty.call(item, 'password_hash')
+  ), 'Public listings exposed an internal or private field');
+
   const publicDetail = await request(`/api/listings/${ownCreate.body.listing.id}`);
   assert(publicDetail.status === 200, 'Public listing detail failed');
+  assert(JSON.stringify(Object.keys(publicDetail.body.listing).sort()) === JSON.stringify(expectedPublicKeys),
+    'Public listing detail did not return the exact public DTO key set');
+
+  const soldDetail = await request('/api/listings/' + await dbGet('SELECT id FROM listings WHERE status = ?', ['sold']).then((row) => row.id));
+  assert(soldDetail.status === 200, 'Sold listing detail was not accessible');
+  assert(soldDetail.body.listing.status === 'sold', 'Sold listing detail did not return sold status');
+
+  const missingDetail = await request('/api/listings/999999999');
+  assert(missingDetail.status === 404, 'Missing listing detail did not return HTTP 404');
 
   const buyerBeforeUpgrade = await dbGet('SELECT id, email, password_hash, student_verified, role FROM users WHERE email = ?', ['buyer@example.com']);
   assert(buyerBeforeUpgrade, 'Buyer account was not found');
@@ -678,7 +792,7 @@ async function run() {
 
   await stopServer();
   fs.rmSync(testDir, { recursive: true, force: true });
-  console.log('Phase 1 API tests passed');
+  console.log('Student Marketplace API tests passed');
 }
 
 run().catch(async (error) => {

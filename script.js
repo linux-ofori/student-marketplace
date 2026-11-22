@@ -4,6 +4,7 @@ let authRequestSequence = 0;
 let currentUserRequest = null;
 let dashboardRequestSequence = 0;
 let authenticationAttemptSequence = 0;
+let marketplaceRequestSequence = 0;
 
 function beginAuthenticationAttempt() {
   authenticationAttemptSequence += 1;
@@ -235,6 +236,9 @@ function createTextElement(tagName, className, value) {
 function createMarketplaceListingCard(listing) {
   const article = document.createElement('article');
   article.className = 'card listing';
+  const link = document.createElement('a');
+  link.className = 'listing-link';
+  link.href = `product.html?id=${encodeURIComponent(String(listing.id))}`;
 
   const thumbnail = document.createElement('div');
   thumbnail.className = 'thumb';
@@ -254,7 +258,8 @@ function createMarketplaceListingCard(listing) {
 
   const description = String(listing.description || '');
   body.append(createTextElement('p', 'meta', `${description.slice(0, 80)}${description.length > 80 ? '...' : ''}`));
-  article.append(thumbnail, body);
+  link.append(thumbnail, body);
+  article.append(link);
   return article;
 }
 
@@ -476,23 +481,49 @@ async function deleteDashboardListing(item, listingElement) {
 async function loadListings() {
   const grid = document.getElementById('listings-grid');
   if (!grid) return;
+  const requestSequence = ++marketplaceRequestSequence;
+
+  const params = new URLSearchParams(window.location.search);
+  const q = params.get('q') || '';
+  const category = params.get('category') || 'All';
+  const sort = params.get('sort') || 'newest';
+
+  grid.replaceChildren();
+  const loading = document.createElement('article');
+  loading.className = 'marketplace-state';
+  loading.append(createTextElement('h3', '', 'Loading listings'), createTextElement('p', 'meta', 'Finding items from students near you.'));
+  grid.append(loading);
 
   try {
-    const response = await fetch(`${API_BASE}/listings`);
+    const apiParams = new URLSearchParams();
+    if (q) apiParams.set('q', q);
+    if (category && category !== 'All') apiParams.set('category', category);
+    apiParams.set('sort', sort);
+
+    const response = await fetch(`${API_BASE}/listings?${apiParams.toString()}`);
     const data = await response.json();
+
+    if (requestSequence !== marketplaceRequestSequence) return;
 
     if (!response.ok || !Array.isArray(data.listings)) {
       throw new Error(data.message || 'Unable to load listings');
     }
 
     if (!data.listings.length) {
-      grid.innerHTML = '<article class="card listing"><div class="card-body"><h3>No listings found</h3><p class="meta">Try a different search term.</p></div></article>';
+      const empty = document.createElement('article');
+      empty.className = 'marketplace-state marketplace-state-empty';
+      empty.append(createTextElement('h3', '', 'No listings found'), createTextElement('p', 'meta', 'Try a different search, category, or sort.'));
+      grid.replaceChildren(empty);
       return;
     }
 
     renderMarketplaceListings(grid, data.listings);
   } catch (error) {
-    grid.innerHTML = '<article class="card listing"><div class="card-body"><h3>Listings unavailable</h3><p class="meta">The backend may be offline.</p></div></article>';
+    if (requestSequence !== marketplaceRequestSequence) return;
+    const failure = document.createElement('article');
+    failure.className = 'marketplace-state marketplace-state-error';
+    failure.append(createTextElement('h3', '', 'Listings unavailable'), createTextElement('p', 'meta', error.message || 'Please try again.'));
+    grid.replaceChildren(failure);
   }
 }
 
@@ -500,28 +531,129 @@ async function handleSearch(event) {
   event.preventDefault();
   const input = document.getElementById('search-input');
   const term = input ? input.value.trim() : '';
+  updateMarketplaceUrl({ q: term });
+  loadListings();
+}
 
-  const grid = document.getElementById('listings-grid');
-  if (!grid) return;
+function syncMarketplaceControls() {
+  const params = new URLSearchParams(window.location.search);
+  const input = document.getElementById('search-input');
+  const category = document.getElementById('category-filter');
+  const sort = document.getElementById('sort-filter');
+
+  if (input) input.value = params.get('q') || '';
+  if (category) category.value = params.get('category') || 'All';
+  if (sort) sort.value = params.get('sort') || 'newest';
+}
+
+function updateMarketplaceUrl(changes) {
+  const params = new URLSearchParams(window.location.search);
+  Object.entries(changes).forEach(([key, value]) => {
+    if (!value || value === 'All') params.delete(key);
+    else params.set(key, value);
+  });
+  const query = params.toString();
+  window.history.replaceState({}, '', query ? `index.html?${query}` : 'index.html');
+  syncMarketplaceControls();
+}
+
+async function loadProductDetail() {
+  const container = document.getElementById('product-detail');
+  if (!container) return;
+
+  const listingId = new URLSearchParams(window.location.search).get('id');
+  if (!listingId || !/^\d+$/.test(listingId)) {
+    container.replaceChildren(createProductDetailState('Listing not found', 'This listing link is missing or invalid.', 'not-found'));
+    return;
+  }
 
   try {
-    const url = term ? `${API_BASE}/listings?q=${encodeURIComponent(term)}` : `${API_BASE}/listings`;
-    const response = await fetch(url);
+    const response = await fetch(`${API_BASE}/listings/${encodeURIComponent(listingId)}`);
     const data = await response.json();
-
-    if (!response.ok || !Array.isArray(data.listings)) {
-      throw new Error(data.message || 'Search failed');
-    }
-
-    if (!data.listings.length) {
-      grid.innerHTML = '<article class="card listing"><div class="card-body"><h3>No results</h3><p class="meta">Try another keyword.</p></div></article>';
+    if (response.status === 404) {
+      container.replaceChildren(createProductDetailState('Listing not found', data.message || 'This listing may no longer be available.', 'not-found'));
       return;
     }
+    if (!response.ok || !data.listing) {
+      throw new Error(data.message || 'Unable to load listing');
+    }
 
-    renderMarketplaceListings(grid, data.listings);
+    container.replaceChildren(createProductDetail(data.listing));
   } catch (error) {
-    grid.innerHTML = '<article class="card listing"><div class="card-body"><h3>Search failed</h3><p class="meta">Please try again.</p></div></article>';
+    container.replaceChildren(createProductDetailState('Listing unavailable', error.message || 'Please try again.', 'error'));
   }
+}
+
+function createProductDetailState(title, message, stateClass) {
+  const state = document.createElement('div');
+  state.className = `product-detail-state ${stateClass || ''}`.trim();
+  state.append(createTextElement('h1', '', title), createTextElement('p', '', message));
+  const back = document.createElement('a');
+  back.className = 'product-action';
+  back.href = 'index.html';
+  back.textContent = 'Back to marketplace';
+  state.append(back);
+  return state;
+}
+
+function formatListingDate(value) {
+  const date = new Date(String(value || '').replace(' ', 'T'));
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-GH', { dateStyle: 'medium' }).format(date);
+}
+
+function createProductDetail(listing) {
+  const layout = document.createElement('article');
+  layout.className = 'product-detail-layout';
+
+  const media = document.createElement('div');
+  media.className = 'product-detail-media';
+  media.setAttribute('aria-hidden', 'true');
+
+  const body = document.createElement('div');
+  body.className = 'product-detail-content';
+  body.append(createTextElement('p', 'product-category', listing.category || 'General'));
+
+  if (listing.status === 'sold') {
+    body.append(createTextElement('p', 'sold-badge', 'Sold'));
+  }
+
+  body.append(
+    createTextElement('h1', '', listing.title),
+    createTextElement('p', 'product-price', formatCurrency(listing.price))
+  );
+
+  if (listing.status === 'sold') {
+    body.append(createTextElement('p', 'sold-message', 'This item has been sold and is no longer available.'));
+  }
+
+  body.append(createTextElement('p', 'product-description', listing.description));
+
+  const facts = document.createElement('dl');
+  facts.className = 'product-facts';
+  [
+    ['Category', listing.category || 'General'],
+    ['Condition', listing.condition || 'Not specified'],
+    ['Delivery', listing.delivery_mode === 'delivery' ? 'Delivery' : 'Campus pickup'],
+    ['Location', listing.location || 'Campus'],
+    ['Seller', listing.seller_name || 'Student seller'],
+    ['Listed', formatListingDate(listing.created_at)]
+  ].forEach(([label, value]) => {
+    if (!value) return;
+    const term = createTextElement('dt', '', label);
+    const description = createTextElement('dd', '', value);
+    facts.append(term, description);
+  });
+  body.append(facts);
+
+  const back = document.createElement('a');
+  back.className = 'product-action';
+  back.href = 'index.html';
+  back.textContent = 'Continue browsing';
+  body.append(back);
+
+  layout.append(media, body);
+  return layout;
 }
 
 async function handleContactSubmit(event) {
@@ -985,6 +1117,36 @@ function initPage() {
     searchForm.addEventListener('submit', handleSearch);
   }
 
+  syncMarketplaceControls();
+
+  const categoryFilter = document.getElementById('category-filter');
+  if (categoryFilter) {
+    categoryFilter.addEventListener('change', () => {
+      updateMarketplaceUrl({ category: categoryFilter.value });
+      loadListings();
+    });
+  }
+
+  const sortFilter = document.getElementById('sort-filter');
+  if (sortFilter) {
+    sortFilter.addEventListener('change', () => {
+      updateMarketplaceUrl({ sort: sortFilter.value });
+      loadListings();
+    });
+  }
+
+  document.querySelectorAll('.categories-grid a.category').forEach((categoryLink) => {
+    categoryLink.addEventListener('click', (event) => {
+      const category = new URL(categoryLink.href).searchParams.get('category');
+      if (category) {
+        event.preventDefault();
+        updateMarketplaceUrl({ category });
+        loadListings();
+        document.getElementById('featured-listings')?.scrollIntoView({ behavior: 'smooth' });
+      }
+    });
+  });
+
   const contactForm = document.getElementById('contact-form');
   if (contactForm) {
     contactForm.addEventListener('submit', handleContactSubmit);
@@ -1029,6 +1191,10 @@ function initPage() {
 
   if (document.getElementById('listings-grid')) {
     loadListings();
+  }
+
+  if (document.getElementById('product-detail')) {
+    loadProductDetail();
   }
 
   if (document.getElementById('jobs-grid')) {
