@@ -114,6 +114,102 @@ function stopServer() {
   });
 }
 
+function runSqliteAt(databasePath, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(databasePath);
+    db.run(sql, params, function (error) {
+      db.close();
+      if (error) reject(error);
+      else resolve({ changes: this.changes, lastID: this.lastID });
+    });
+  });
+}
+
+function getSqliteAt(databasePath, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(databasePath);
+    db.get(sql, params, (error, row) => {
+      db.close();
+      if (error) reject(error);
+      else resolve(row);
+    });
+  });
+}
+
+async function assertForeignKeyPreflightStopsWithoutRepair() {
+  const orphanDbPath = path.join(testDir, 'orphaned-foreign-key.db');
+  await runSqliteAt(orphanDbPath, `
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT DEFAULT 'student',
+      student_verified INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await runSqliteAt(orphanDbPath, `
+    CREATE TABLE listings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      category TEXT NOT NULL,
+      price REAL NOT NULL,
+      condition TEXT NOT NULL,
+      delivery_mode TEXT DEFAULT 'pickup',
+      location TEXT,
+      status TEXT DEFAULT 'active',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
+  await runSqliteAt(
+    orphanDbPath,
+    'INSERT INTO listings (user_id, title, description, category, price, condition) VALUES (?, ?, ?, ?, ?, ?)',
+    [987654, 'Orphan listing', 'Preflight fixture', 'Other', 1, 'Good']
+  );
+
+  const probePort = await getAvailablePort();
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['server.js'], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        PORT: String(probePort),
+        JWT_SECRET: TEST_JWT_SECRET,
+        STUDENT_MARKET_DB_PATH: orphanDbPath
+      },
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error('Server did not stop on the orphaned foreign-key fixture.'));
+    }, 5000);
+
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      if (code !== 1) return reject(new Error('Server did not fail on the orphaned foreign-key fixture.'));
+      if (!stderr.includes('Foreign-key integrity check failed')) {
+        return reject(new Error('Foreign-key preflight failure was not reported.'));
+      }
+      resolve();
+    });
+  });
+
+  const orphanCount = await getSqliteAt(orphanDbPath, 'SELECT COUNT(*) AS total FROM listings WHERE user_id = ?', [987654]);
+  const userCount = await getSqliteAt(orphanDbPath, 'SELECT COUNT(*) AS total FROM users');
+  assert(orphanCount.total === 1, 'Foreign-key preflight changed the orphaned listing');
+  assert(userCount.total === 0, 'Foreign-key preflight seeded or changed users before stopping');
+}
+
 function request(requestPath, options = {}) {
   return new Promise((resolve, reject) => {
     const requestBody = options.rawBody !== undefined
@@ -197,6 +293,7 @@ function dbAll(sql, params = []) {
 
 async function run() {
   testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-marketplace-test-'));
+  await assertForeignKeyPreflightStopsWithoutRepair();
   dbPath = path.join(testDir, 'test.db');
   await assertJwtSecretRequired(undefined, 'missing');
   await assertJwtSecretRequired('   ', 'blank');
@@ -268,6 +365,41 @@ async function run() {
     body: { title: 'Seller Item', description: 'Own listing', category: 'Textbooks', price: 25, condition: 'Good', deliveryMode: 'pickup', location: 'Campus' }
   });
   assert(ownCreate.status === 201, 'Seller listing creation failed');
+
+  const concurrentCreates = await Promise.all(['Concurrent Item A', 'Concurrent Item B'].map((title) =>
+    request('/api/listings', {
+      method: 'POST',
+      headers: authHeader(seller.body.token),
+      body: { title, description: 'Concurrent transaction test', category: 'Other', price: 12, condition: 'Good', deliveryMode: 'pickup', location: 'Campus' }
+    })
+  ));
+  assert(concurrentCreates.every((response) => response.status === 201), 'Concurrent listing transactions did not both commit');
+  assert(concurrentCreates[0].body.listing.id !== concurrentCreates[1].body.listing.id, 'Concurrent listing transactions reused a listing ID');
+
+  const listingCountBeforeRollback = await dbGet(
+    'SELECT COUNT(*) AS total FROM listings WHERE user_id = ?',
+    [seller.body.user.id]
+  );
+  await dbRun(`
+    CREATE TRIGGER reject_transaction_listing
+    AFTER INSERT ON listings
+    WHEN NEW.title = 'Rollback Transaction Test'
+    BEGIN
+      SELECT RAISE(FAIL, 'forced transaction test failure');
+    END
+  `);
+  const rollbackResponse = await request('/api/listings', {
+    method: 'POST',
+    headers: authHeader(seller.body.token),
+    body: { title: 'Rollback Transaction Test', description: 'Must not persist', category: 'Other', price: 13, condition: 'Good', deliveryMode: 'pickup', location: 'Campus' }
+  });
+  assert(rollbackResponse.status === 500, 'Forced transaction failure did not produce an API error');
+  await dbRun('DROP TRIGGER reject_transaction_listing');
+  const listingCountAfterRollback = await dbGet(
+    'SELECT COUNT(*) AS total FROM listings WHERE user_id = ?',
+    [seller.body.user.id]
+  );
+  assert(listingCountAfterRollback.total === listingCountBeforeRollback.total, 'Failed listing transaction left a partial insert');
 
   const validListing = {
     title: 'Valid Item',

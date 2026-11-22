@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const { AsyncLocalStorage } = require('async_hooks');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,6 +26,196 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const db = new sqlite3.Database(dbPath);
+const transactionStorage = new AsyncLocalStorage();
+let databaseQueue = Promise.resolve();
+let databaseFailure = null;
+
+const fatalDatabaseCodes = new Set([
+  'SQLITE_CANTOPEN',
+  'SQLITE_CORRUPT',
+  'SQLITE_INTERNAL',
+  'SQLITE_IOERR',
+  'SQLITE_MISUSE',
+  'SQLITE_NOTADB',
+  'SQLITE_PROTOCOL'
+]);
+
+function isFatalDatabaseError(error) {
+  return Boolean(error && fatalDatabaseCodes.has(error.code));
+}
+
+function markDatabaseUnhealthy() {
+  if (!databaseFailure) {
+    databaseFailure = new Error('Database connection is unavailable.');
+    databaseFailure.code = 'DATABASE_UNAVAILABLE';
+  }
+}
+
+function ensureDatabaseHealthy() {
+  if (databaseFailure) {
+    throw databaseFailure;
+  }
+}
+
+async function acquireDatabaseQueue() {
+  const previous = databaseQueue;
+  let release;
+  databaseQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  return release;
+}
+
+async function withDatabaseQueue(operation) {
+  const release = await acquireDatabaseQueue();
+  try {
+    ensureDatabaseHealthy();
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+function executeRun(sql, params = []) {
+  ensureDatabaseHealthy();
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (error) {
+      if (error) {
+        if (isFatalDatabaseError(error)) markDatabaseUnhealthy();
+        reject(error);
+        return;
+      }
+      resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function executeGet(sql, params = []) {
+  ensureDatabaseHealthy();
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (error, row) => {
+      if (error) {
+        if (isFatalDatabaseError(error)) markDatabaseUnhealthy();
+        reject(error);
+        return;
+      }
+      resolve(row);
+    });
+  });
+}
+
+function executeAll(sql, params = []) {
+  ensureDatabaseHealthy();
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (error, rows) => {
+      if (error) {
+        if (isFatalDatabaseError(error)) markDatabaseUnhealthy();
+        reject(error);
+        return;
+      }
+      resolve(rows);
+    });
+  });
+}
+
+db.on('error', (error) => {
+  if (isFatalDatabaseError(error)) markDatabaseUnhealthy();
+});
+
+function createTransactionContext() {
+  const state = {
+    acceptingQueries: true,
+    inFlight: new Set(),
+    failure: null
+  };
+
+  const executeScoped = (operation) => {
+    if (!state.acceptingQueries) {
+      return Promise.reject(new Error('Transaction is no longer accepting queries.'));
+    }
+
+    let query;
+    try {
+      ensureDatabaseHealthy();
+      query = operation();
+    } catch (error) {
+      state.failure ||= error;
+      return Promise.reject(error);
+    }
+
+    state.inFlight.add(query);
+    query.then(
+      () => state.inFlight.delete(query),
+      (error) => {
+        state.failure ||= error;
+        state.inFlight.delete(query);
+      }
+    );
+    query.catch(() => {});
+    return query;
+  };
+
+  const context = {
+    runQuery: (sql, params = []) => executeScoped(() => executeRun(sql, params)),
+    getQuery: (sql, params = []) => executeScoped(() => executeGet(sql, params)),
+    allQuery: (sql, params = []) => executeScoped(() => executeAll(sql, params)),
+    async closeAndDrain() {
+      state.acceptingQueries = false;
+      while (state.inFlight.size) {
+        await Promise.allSettled([...state.inFlight]);
+      }
+      return state.failure;
+    }
+  };
+
+  return context;
+}
+
+async function withTransaction(callback) {
+  if (typeof callback !== 'function') {
+    throw new TypeError('Transaction callback must be a function.');
+  }
+  if (transactionStorage.getStore()) {
+    throw new Error('Nested database transactions are not supported.');
+  }
+
+  return withDatabaseQueue(async () => {
+    let transactionStarted = false;
+    let context;
+
+    try {
+      await executeRun('BEGIN IMMEDIATE');
+      transactionStarted = true;
+      context = createTransactionContext();
+
+      const result = await transactionStorage.run(context, () => callback(context));
+      const queryFailure = await context.closeAndDrain();
+      if (queryFailure) throw queryFailure;
+
+      await executeRun('COMMIT');
+      transactionStarted = false;
+      return result;
+    } catch (error) {
+      if (context) {
+        const queryFailure = await context.closeAndDrain();
+        if (!error && queryFailure) error = queryFailure;
+      }
+
+      if (transactionStarted) {
+        try {
+          await executeRun('ROLLBACK');
+          transactionStarted = false;
+        } catch (rollbackError) {
+          markDatabaseUnhealthy();
+          throw databaseFailure;
+        }
+      }
+
+      throw error;
+    }
+  });
+}
 
 const isStudentEmail = (email) => {
   const normalized = String(email || '').trim().toLowerCase();
@@ -39,29 +230,23 @@ const getUserSafe = (user) => ({
   student_verified: Boolean(user.student_verified)
 });
 
-const runQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve({ id: this.lastID, changes: this.changes });
-    });
-  });
+const runQuery = (sql, params = []) => {
+  const transaction = transactionStorage.getStore();
+  if (transaction) return transaction.runQuery(sql, params);
+  return withDatabaseQueue(() => executeRun(sql, params));
+};
 
-const getQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
+const getQuery = (sql, params = []) => {
+  const transaction = transactionStorage.getStore();
+  if (transaction) return transaction.getQuery(sql, params);
+  return withDatabaseQueue(() => executeGet(sql, params));
+};
 
-const allQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
+const allQuery = (sql, params = []) => {
+  const transaction = transactionStorage.getStore();
+  if (transaction) return transaction.allQuery(sql, params);
+  return withDatabaseQueue(() => executeAll(sql, params));
+};
 
 const createToken = (user) =>
   jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -246,6 +431,20 @@ async function initializeDatabase() {
     )
   `);
 
+  const foreignKeyViolations = await allQuery('PRAGMA foreign_key_check');
+  if (foreignKeyViolations.length) {
+    const details = foreignKeyViolations.map((violation) =>
+      `${violation.table} row ${violation.row} references ${violation.parent} (constraint ${violation.fkid})`
+    ).join('; ');
+    throw new Error(`Foreign-key integrity check failed; existing records require review: ${details}`);
+  }
+
+  await runQuery('PRAGMA foreign_keys = ON');
+  const foreignKeySetting = await getQuery('PRAGMA foreign_keys');
+  if (!foreignKeySetting || foreignKeySetting.foreign_keys !== 1) {
+    throw new Error('Could not enable SQLite foreign-key enforcement.');
+  }
+
   await runQuery("UPDATE users SET role = 'buyer' WHERE role = 'student'");
 
   const userCount = await getQuery('SELECT COUNT(*) AS total FROM users');
@@ -310,6 +509,13 @@ async function initializeDatabase() {
 
 app.use(cors());
 app.use(express.json());
+
+app.use((req, res, next) => {
+  if (databaseFailure) {
+    return res.status(503).json({ message: 'Database unavailable.' });
+  }
+  next();
+});
 
 app.get('/api/health', (req, res) => {
   res.json({
@@ -534,22 +740,25 @@ app.post('/api/listings', authMiddleware, sellerMiddleware, async (req, res) => 
 
   try {
     const { title, description, category, price, condition, deliveryMode, location } = validation.values;
-    const listing = await runQuery(
-      `INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.user.id,
-        title,
-        description,
-        category,
-        price,
-        condition,
-        deliveryMode,
-        location
-      ]
-    );
+    const savedListing = await withTransaction(async () => {
+      const listing = await runQuery(
+        `INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          req.user.id,
+          title,
+          description,
+          category,
+          price,
+          condition,
+          deliveryMode,
+          location
+        ]
+      );
 
-    const savedListing = await getQuery('SELECT * FROM listings WHERE id = ?', [listing.id]);
+      return getQuery('SELECT * FROM listings WHERE id = ?', [listing.id]);
+    });
+
     return res.status(201).json({ message: 'Listing created successfully.', listing: savedListing });
   } catch (error) {
     console.error('Create listing error:', error);
