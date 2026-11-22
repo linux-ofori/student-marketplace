@@ -14,7 +14,7 @@
         <a href="index.html">Home</a>
         <a id="seller-nav-link" href="sell.html" class="hidden-when-logged-out">Sell</a>
         <a href="jobs.html">Jobs</a>
-        <a id="dashboard-link" href="dashboard.html">Dashboard</a>
+        <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
         <a href="about.html">About</a>
         <a id="auth-link" href="login.html">Login</a>
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
@@ -35,27 +35,22 @@
       <div id="dashboard-role-badges" class="role-badges"></div>
     </section>
 
-    <section class="stats-grid">
+    <p id="dashboard-status" class="form-status" role="status" aria-live="polite">Loading dashboard...</p>
+    <button id="dashboard-retry" class="dashboard-retry" type="button" hidden>Retry</button>
+
+    <section id="dashboard-stats" class="stats-grid" hidden>
       <article class="stat-card">
-        <span class="stat-label">Total sales</span>
-        <strong>₵480</strong>
+        <span class="stat-label">Total listings</span>
+        <strong id="dashboard-total-listings">0</strong>
       </article>
       <article class="stat-card">
         <span class="stat-label">Active listings</span>
-        <strong>6</strong>
-      </article>
-      <article class="stat-card">
-        <span class="stat-label">Orders placed</span>
-        <strong>12</strong>
-      </article>
-      <article class="stat-card">
-        <span class="stat-label">Wallet balance</span>
-        <strong>₵210</strong>
+        <strong id="dashboard-active-listings">0</strong>
       </article>
     </section>
 
     <section class="dashboard-layout">
-      <div class="panel">
+      <div id="seller-listings-panel" class="panel" hidden>
         <div class="panel-header">
           <h2>My listings</h2>
           <a id="dashboard-add-listing" href="sell.html" class="hidden-when-logged-out">Add new</a>

@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 
+const TEST_JWT_SECRET = 'student-market-api-test-only-secret';
 let serverProcess;
 let port;
 let baseUrl;
@@ -24,6 +25,50 @@ function getAvailablePort() {
   });
 }
 
+async function assertJwtSecretRequired(secretValue, label) {
+  const probePort = await getAvailablePort();
+  const probeDbPath = path.join(testDir, `jwt-secret-${label}.db`);
+  const environment = {
+    ...process.env,
+    PORT: String(probePort),
+    STUDENT_MARKET_DB_PATH: probeDbPath
+  };
+  if (secretValue === undefined) delete environment.JWT_SECRET;
+  else environment.JWT_SECRET = secretValue;
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['server.js'], {
+      cwd: path.join(__dirname, '..'),
+      env: environment,
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Server did not reject ${label} JWT_SECRET.`));
+    }, 3000);
+
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      if (code !== 1) {
+        return reject(new Error(`Server did not fail with exit code 1 for ${label} JWT_SECRET.`));
+      }
+      if (!stderr.includes('Configuration error: JWT_SECRET must be set to a non-empty value.')) {
+        return reject(new Error(`Server did not report the expected safe configuration error for ${label} JWT_SECRET.`));
+      }
+      if (fs.existsSync(probeDbPath)) {
+        return reject(new Error(`Server opened the database before rejecting ${label} JWT_SECRET.`));
+      }
+      resolve();
+    });
+  });
+}
+
 function startServer() {
   return new Promise((resolve, reject) => {
     serverProcess = spawn(process.execPath, ['server.js'], {
@@ -31,7 +76,7 @@ function startServer() {
       env: {
         ...process.env,
         PORT: String(port),
-        JWT_SECRET: 'isolated-api-test-secret',
+        JWT_SECRET: TEST_JWT_SECRET,
         STUDENT_MARKET_DB_PATH: dbPath
       },
       stdio: 'ignore'
@@ -71,9 +116,14 @@ function stopServer() {
 
 function request(requestPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const requestBody = options.rawBody !== undefined
+      ? options.rawBody
+      : options.body !== undefined
+        ? JSON.stringify(options.body)
+        : null;
     const headers = {
       ...(options.headers || {}),
-      ...(options.body ? { 'Content-Type': 'application/json' } : {})
+      ...(requestBody !== null ? { 'Content-Type': 'application/json' } : {})
     };
 
     const req = http.request(`${baseUrl}${requestPath}`, {
@@ -92,7 +142,7 @@ function request(requestPath, options = {}) {
     });
 
     req.on('error', reject);
-    if (options.body) req.write(JSON.stringify(options.body));
+    if (requestBody !== null) req.write(requestBody);
     req.end();
   });
 }
@@ -148,6 +198,8 @@ function dbAll(sql, params = []) {
 async function run() {
   testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'student-marketplace-test-'));
   dbPath = path.join(testDir, 'test.db');
+  await assertJwtSecretRequired(undefined, 'missing');
+  await assertJwtSecretRequired('   ', 'blank');
   port = await getAvailablePort();
   baseUrl = `http://127.0.0.1:${port}`;
 
@@ -169,6 +221,12 @@ async function run() {
 
   const bodySecurityBuyer = await signup('Body Security Buyer', 'body-security@example.com', 'buyer');
   assert(bodySecurityBuyer.status === 201, 'Body-security Buyer signup failed');
+
+  const buyerDashboard = await request('/api/dashboard', {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(buyerDashboard.status === 200, 'Buyer dashboard request failed');
+  assert(buyerDashboard.body.activity.length === 0, 'Buyer dashboard included fabricated seller activity');
 
   for (const invalidRole of [undefined, 'student', 'admin', 'Buyer', 'SELLER']) {
     const response = await signup(`Invalid ${invalidRole}`, `invalid_${String(invalidRole)}@example.com`, invalidRole);
@@ -211,6 +269,71 @@ async function run() {
   });
   assert(ownCreate.status === 201, 'Seller listing creation failed');
 
+  const validListing = {
+    title: 'Valid Item',
+    description: 'Valid description',
+    category: 'Other',
+    price: 10,
+    condition: 'Good',
+    deliveryMode: 'pickup',
+    location: 'Campus'
+  };
+  const invalidListingCases = [
+    [{ ...validListing, title: '   ' }, 'blank title'],
+    [{ ...validListing, description: '' }, 'blank description'],
+    [{ ...validListing, category: 12 }, 'non-string category'],
+    [{ ...validListing, title: 'x'.repeat(121) }, 'oversized title'],
+    [{ ...validListing, description: 'x'.repeat(2001) }, 'oversized description'],
+    [{ ...validListing, category: 'x'.repeat(61) }, 'oversized category'],
+    [{ ...validListing, price: 0 }, 'zero price'],
+    [{ ...validListing, price: -1 }, 'negative price'],
+    [{ ...validListing, price: '10' }, 'string price'],
+    [{ ...validListing, price: Number.NaN }, 'non-finite price'],
+    [{ ...validListing, condition: 'Like New' }, 'unsupported condition'],
+    [{ ...validListing, deliveryMode: 'ship' }, 'unsupported delivery mode'],
+    [{ ...validListing, location: null }, 'null location'],
+    [{ ...validListing, location: '' }, 'blank location'],
+    [{ ...validListing, location: '   ' }, 'whitespace location'],
+    [{ ...validListing, location: undefined }, 'missing location'],
+    [{ ...validListing, location: 'x'.repeat(121) }, 'oversized location']
+  ];
+
+  for (const [body, label] of invalidListingCases) {
+    const invalidCreate = await request('/api/listings', {
+      method: 'POST',
+      headers: authHeader(seller.body.token),
+      body
+    });
+    assert(invalidCreate.status === 400, `Listing creation accepted ${label}`);
+  }
+
+  const listingCountBeforeNonFiniteCreate = await dbGet(
+    'SELECT COUNT(*) AS total FROM listings WHERE user_id = ?',
+    [seller.body.user.id]
+  );
+  const nonFiniteCreate = await request('/api/listings', {
+    method: 'POST',
+    headers: authHeader(seller.body.token),
+    rawBody: '{"title":"Non-finite price","description":"Invalid JSON number","category":"Other","price":1e400,"condition":"Good","deliveryMode":"pickup","location":"Campus"}'
+  });
+  assert(nonFiniteCreate.status === 400, 'Listing creation accepted a non-finite JSON price');
+  const listingCountAfterNonFiniteCreate = await dbGet(
+    'SELECT COUNT(*) AS total FROM listings WHERE user_id = ?',
+    [seller.body.user.id]
+  );
+  assert(listingCountAfterNonFiniteCreate.total === listingCountBeforeNonFiniteCreate.total, 'Non-finite price created a listing');
+
+  for (const requiredField of ['title', 'description', 'category', 'price', 'condition']) {
+    const body = { ...validListing };
+    delete body[requiredField];
+    const missingCreateField = await request('/api/listings', {
+      method: 'POST',
+      headers: authHeader(seller.body.token),
+      body
+    });
+    assert(missingCreateField.status === 400, `Listing creation accepted missing ${requiredField}`);
+  }
+
   const ownUpdate = await request(`/api/listings/${ownCreate.body.listing.id}`, {
     method: 'PUT',
     headers: authHeader(seller.body.token),
@@ -218,12 +341,63 @@ async function run() {
   });
   assert(ownUpdate.status === 200, 'Seller could not update own listing');
 
+  const listingAfterPartialUpdate = await request(`/api/listings/${ownCreate.body.listing.id}`);
+  assert(listingAfterPartialUpdate.body.listing.location === 'Campus', 'Omitted location was erased by a partial update');
+
+  const invalidUpdateCases = [
+    [{ price: -3 }, 'negative price'],
+    [{ price: Number.POSITIVE_INFINITY }, 'non-finite price'],
+    [{ title: '   ' }, 'blank title'],
+    [{ condition: 'Unknown' }, 'unsupported condition'],
+    [{ deliveryMode: 'courier' }, 'unsupported delivery mode'],
+    [{ location: null }, 'null location'],
+    [{ location: '' }, 'blank location'],
+    [{ location: '   ' }, 'whitespace location'],
+    [{ status: 'removed' }, 'unsupported status'],
+    [{ description: 'x'.repeat(2001) }, 'oversized description']
+  ];
+
+  for (const [body, label] of invalidUpdateCases) {
+    const invalidUpdate = await request(`/api/listings/${ownCreate.body.listing.id}`, {
+      method: 'PUT',
+      headers: authHeader(seller.body.token),
+      body
+    });
+    assert(invalidUpdate.status === 400, `Listing update accepted ${label}`);
+  }
+
+  const unchangedListing = await request(`/api/listings/${ownCreate.body.listing.id}`);
+  assert(unchangedListing.body.listing.title === 'Updated Seller Item', 'Invalid update partially changed the listing');
+  assert(unchangedListing.body.listing.price === 30, 'Invalid update partially changed the listing price');
+  assert(unchangedListing.body.listing.location === 'Campus', 'Invalid update changed the listing location');
+
+  const nonFiniteUpdate = await request(`/api/listings/${ownCreate.body.listing.id}`, {
+    method: 'PUT',
+    headers: authHeader(seller.body.token),
+    rawBody: '{"price":1e400}'
+  });
+  assert(nonFiniteUpdate.status === 400, 'Listing update accepted a non-finite JSON price');
+  const listingAfterNonFiniteUpdate = await request(`/api/listings/${ownCreate.body.listing.id}`);
+  assert(listingAfterNonFiniteUpdate.body.listing.price === 30, 'Non-finite price modified the listing');
+
   const otherCreate = await request('/api/listings', {
     method: 'POST',
     headers: authHeader(secondSeller.body.token),
     body: { title: 'Other Seller Item', description: 'Other owner', category: 'Electronics', price: 100, condition: 'Excellent', deliveryMode: 'delivery', location: 'Campus' }
   });
   assert(otherCreate.status === 201, 'Second seller listing creation failed');
+
+  const sellerDashboard = await request('/api/dashboard', {
+    headers: authHeader(seller.body.token)
+  });
+  assert(sellerDashboard.status === 200, 'Seller dashboard request failed');
+  assert(sellerDashboard.body.listings.every((item) => item.user_id === seller.body.user.id), 'Dashboard returned another seller\'s listing');
+  assert(sellerDashboard.body.stats.totalListings === sellerDashboard.body.listings.length, 'Dashboard total listing count is not based on returned listings');
+  assert(sellerDashboard.body.stats.activeListings === sellerDashboard.body.listings.filter((item) => item.status === 'active').length, 'Dashboard active count is not based on listing state');
+  assert(sellerDashboard.body.activity[0].text.includes(sellerDashboard.body.listings[0].title), 'Seller activity is not based on an actual listing');
+  assert(!Object.prototype.hasOwnProperty.call(sellerDashboard.body.stats, 'totalSales'), 'Dashboard still returns fabricated sales');
+  assert(!Object.prototype.hasOwnProperty.call(sellerDashboard.body.stats, 'ordersPlaced'), 'Dashboard still returns fabricated orders');
+  assert(!Object.prototype.hasOwnProperty.call(sellerDashboard.body.stats, 'walletBalance'), 'Dashboard still returns fabricated wallet balance');
 
   const crossUpdate = await request(`/api/listings/${otherCreate.body.listing.id}`, {
     method: 'PUT',
@@ -338,7 +512,7 @@ async function run() {
   const upgradedCannotClaimBuyerCreate = await request('/api/listings', {
     method: 'POST',
     headers: authHeader(upgrade.body.token),
-    body: { title: 'Upgraded Buyer Listing', description: 'Now allowed', category: 'Other', price: 15, condition: 'Good', deliveryMode: 'pickup' }
+    body: { title: 'Upgraded Buyer Listing', description: 'Now allowed', category: 'Other', price: 15, condition: 'Good', deliveryMode: 'pickup', location: 'Campus' }
   });
   assert(upgradedCannotClaimBuyerCreate.status === 201, 'Upgraded Seller could not create listings');
 

@@ -8,7 +8,12 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'student-market-secret';
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (typeof JWT_SECRET !== 'string' || JWT_SECRET.trim().length === 0) {
+  console.error('Configuration error: JWT_SECRET must be set to a non-empty value.');
+  process.exit(1);
+}
 
 const dbPath = process.env.STUDENT_MARKET_DB_PATH
   ? path.resolve(process.env.STUDENT_MARKET_DB_PATH)
@@ -90,6 +95,104 @@ const sellerMiddleware = (req, res, next) => {
   }
   next();
 };
+
+const listingFieldLimits = {
+  title: 120,
+  description: 2000,
+  category: 60,
+  location: 120
+};
+const listingConditions = new Set(['Excellent', 'Good', 'Fair', 'Poor']);
+const listingDeliveryModes = new Set(['pickup', 'delivery']);
+const listingStatuses = new Set(['active', 'sold']);
+
+function validateListingInput(input, partial = false) {
+  const errors = [];
+  const values = {};
+
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { values, errors: ['Request body must be an object.'] };
+  }
+
+  const hasField = (field) => Object.prototype.hasOwnProperty.call(input, field);
+
+  for (const [field, maxLength] of Object.entries({
+    title: listingFieldLimits.title,
+    description: listingFieldLimits.description,
+    category: listingFieldLimits.category
+  })) {
+    if (!hasField(field)) {
+      if (!partial) errors.push(`${field} is required.`);
+      continue;
+    }
+    if (typeof input[field] !== 'string') {
+      errors.push(`${field} must be a string.`);
+      continue;
+    }
+
+    const value = input[field].trim();
+    if (!value) errors.push(`${field} cannot be blank.`);
+    else if (value.length > maxLength) errors.push(`${field} must be ${maxLength} characters or fewer.`);
+    else values[field] = value;
+  }
+
+  if (!hasField('price')) {
+    if (!partial) errors.push('price is required.');
+  } else if (typeof input.price !== 'number' || !Number.isFinite(input.price) || input.price <= 0) {
+    errors.push('price must be a finite number greater than 0.');
+  } else {
+    values.price = input.price;
+  }
+
+  if (!hasField('condition')) {
+    if (!partial) errors.push('condition is required.');
+  } else if (typeof input.condition !== 'string' || !listingConditions.has(input.condition)) {
+    errors.push('condition must be Excellent, Good, Fair, or Poor.');
+  } else {
+    values.condition = input.condition;
+  }
+
+  if (hasField('deliveryMode')) {
+    if (typeof input.deliveryMode !== 'string' || !listingDeliveryModes.has(input.deliveryMode)) {
+      errors.push('deliveryMode must be pickup or delivery.');
+    } else {
+      values.deliveryMode = input.deliveryMode;
+    }
+  } else if (!partial) {
+    values.deliveryMode = 'pickup';
+  }
+
+  if (hasField('location')) {
+    if (typeof input.location !== 'string') {
+      errors.push('location must be a nonblank string.');
+    } else {
+      const location = input.location.trim();
+      if (!location) {
+        errors.push('location cannot be blank.');
+      } else if (location.length > listingFieldLimits.location) {
+        errors.push(`location must be ${listingFieldLimits.location} characters or fewer.`);
+      } else {
+        values.location = location;
+      }
+    }
+  } else if (!partial) {
+    errors.push('location is required.');
+  }
+
+  if (hasField('status')) {
+    if (typeof input.status !== 'string' || !listingStatuses.has(input.status)) {
+      errors.push('status must be active or sold.');
+    } else {
+      values.status = input.status;
+    }
+  }
+
+  if (partial && Object.keys(values).length === 0 && errors.length === 0) {
+    errors.push('At least one listing field must be provided.');
+  }
+
+  return { values, errors };
+}
 
 async function initializeDatabase() {
   await runQuery(`
@@ -346,17 +449,13 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
       [user.id]
     );
 
-    const recentActivity = [
-      { text: `You listed "${listings[0]?.title || 'your latest item'}" on the marketplace.`, time: 'Today' },
-      { text: `Your profile is ${user.student_verified ? 'student verified' : 'pending verification'}.`, time: 'Now' },
-      { text: 'New campus inquiries can be answered from your dashboard.', time: 'This week' }
-    ];
+    const recentActivity = user.role === 'seller' && listings.length
+      ? [{ text: `Latest listing: ${listings[0].title}`, time: listings[0].created_at }]
+      : [];
 
     const stats = {
-      totalSales: listings.reduce((sum, item) => sum + Number(item.price || 0), 0),
-      activeListings: listings.filter((item) => item.status !== 'sold').length,
-      ordersPlaced: 12,
-      walletBalance: Math.max(50, Math.round(listings.reduce((sum, item) => sum + Number(item.price || 0), 0) * 0.45))
+      totalListings: listings.length,
+      activeListings: listings.filter((item) => item.status === 'active').length
     };
 
     res.json({
@@ -428,25 +527,25 @@ app.get('/api/listings/:id', async (req, res) => {
 });
 
 app.post('/api/listings', authMiddleware, sellerMiddleware, async (req, res) => {
-  const { title, description, category, price, condition, deliveryMode, location } = req.body || {};
-
-  if (!title || !description || !category || !price || !condition) {
-    return res.status(400).json({ message: 'Title, description, category, price, and condition are required.' });
+  const validation = validateListingInput(req.body);
+  if (validation.errors.length) {
+    return res.status(400).json({ message: 'Invalid listing data.', errors: validation.errors });
   }
 
   try {
+    const { title, description, category, price, condition, deliveryMode, location } = validation.values;
     const listing = await runQuery(
       `INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.user.id,
-        String(title).trim(),
-        String(description).trim(),
-        String(category).trim(),
-        Number(price),
-        String(condition).trim(),
-        deliveryMode || 'pickup',
-        location ? String(location).trim() : null
+        title,
+        description,
+        category,
+        price,
+        condition,
+        deliveryMode,
+        location
       ]
     );
 
@@ -460,7 +559,6 @@ app.post('/api/listings', authMiddleware, sellerMiddleware, async (req, res) => 
 
 app.put('/api/listings/:id', authMiddleware, sellerMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { title, description, category, price, condition, deliveryMode, location, status } = req.body || {};
 
   try {
     const existingListing = await getQuery('SELECT * FROM listings WHERE id = ?', [id]);
@@ -472,19 +570,36 @@ app.put('/api/listings/:id', authMiddleware, sellerMiddleware, async (req, res) 
       return res.status(403).json({ message: 'You can only update your own listings.' });
     }
 
+    const validation = validateListingInput(req.body, true);
+    if (validation.errors.length) {
+      return res.status(400).json({ message: 'Invalid listing data.', errors: validation.errors });
+    }
+
+    const updatedValues = {
+      title: existingListing.title,
+      description: existingListing.description,
+      category: existingListing.category,
+      price: existingListing.price,
+      condition: existingListing.condition,
+      deliveryMode: existingListing.delivery_mode,
+      location: existingListing.location,
+      status: existingListing.status,
+      ...validation.values
+    };
+
     await runQuery(
       `UPDATE listings
        SET title = ?, description = ?, category = ?, price = ?, condition = ?, delivery_mode = ?, location = ?, status = ?
        WHERE id = ?`,
       [
-        title || existingListing.title,
-        description || existingListing.description,
-        category || existingListing.category,
-        price !== undefined ? Number(price) : existingListing.price,
-        condition || existingListing.condition,
-        deliveryMode || existingListing.delivery_mode,
-        location !== undefined ? String(location).trim() : existingListing.location,
-        status || existingListing.status,
+        updatedValues.title,
+        updatedValues.description,
+        updatedValues.category,
+        updatedValues.price,
+        updatedValues.condition,
+        updatedValues.deliveryMode,
+        updatedValues.location,
+        updatedValues.status,
         id
       ]
     );

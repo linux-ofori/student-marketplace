@@ -29,15 +29,15 @@
     <section class="container contact-section">
       <h1>Sell an Item</h1>
       <p>List your item for fellow students to discover.</p>
-      <form class="contact-form" id="sell-form">
+      <form class="contact-form" id="sell-form" hidden>
         <label for="sell-title">Title</label>
-        <input id="sell-title" name="title" type="text" placeholder="e.g. Intro Biology Book" required>
+        <input id="sell-title" name="title" type="text" maxlength="120" placeholder="e.g. Intro Biology Book" required>
 
         <label for="sell-price">Price</label>
         <input id="sell-price" name="price" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required>
 
         <label for="sell-category">Category</label>
-        <input id="sell-category" name="category" type="text" placeholder="Textbooks" required>
+        <input id="sell-category" name="category" type="text" maxlength="60" placeholder="Textbooks" required>
 
         <label for="sell-condition">Condition</label>
         <select id="sell-condition" name="condition" required>
@@ -54,14 +54,14 @@
         </select>
 
         <label for="sell-location">Location</label>
-        <input id="sell-location" name="location" type="text" placeholder="Campus Center" required>
+        <input id="sell-location" name="location" type="text" maxlength="120" placeholder="Campus Center" required>
 
         <label for="sell-description">Description</label>
-        <textarea id="sell-description" name="description" rows="5" placeholder="Describe the item, condition, and pickup details" required></textarea>
+        <textarea id="sell-description" name="description" rows="5" maxlength="2000" placeholder="Describe the item, condition, and pickup details" required></textarea>
 
         <button type="submit">Publish Listing</button>
       </form>
-      <p id="sell-status" class="form-status" aria-live="polite"></p>
+      <p id="sell-status" class="form-status" aria-live="polite">Checking Seller access...</p>
     </section>
   </main>
 
