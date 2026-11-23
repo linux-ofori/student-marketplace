@@ -236,9 +236,9 @@ function createTextElement(tagName, className, value) {
 function createMarketplaceListingCard(listing) {
   const article = document.createElement('article');
   article.className = 'card listing';
-  const link = document.createElement('a');
-  link.className = 'listing-link';
-  link.href = `product.html?id=${encodeURIComponent(String(listing.id))}`;
+  const productLink = document.createElement('a');
+  productLink.className = 'listing-link';
+  productLink.href = `product.html?id=${encodeURIComponent(String(listing.id))}`;
 
   const thumbnail = document.createElement('div');
   thumbnail.className = 'thumb';
@@ -252,14 +252,28 @@ function createMarketplaceListingCard(listing) {
     createTextElement(
       'p',
       'meta',
-      `${listing.category || 'General'} • ${listing.location || 'Campus pickup'} • ${listing.seller_name || 'Student seller'}`
+      `${listing.category || 'General'} • ${listing.location || 'Campus pickup'}`
     )
   );
 
   const description = String(listing.description || '');
   body.append(createTextElement('p', 'meta', `${description.slice(0, 80)}${description.length > 80 ? '...' : ''}`));
-  link.append(thumbnail, body);
-  article.append(link);
+  productLink.append(thumbnail, body);
+  article.append(productLink);
+
+  const sellerRow = document.createElement('div');
+  sellerRow.className = 'listing-seller';
+  sellerRow.append(createTextElement('span', '', 'Seller: '));
+  const sellerId = Number(listing.seller_id);
+  if (Number.isSafeInteger(sellerId) && sellerId > 0) {
+    const sellerLink = document.createElement('a');
+    sellerLink.href = `seller.html?id=${encodeURIComponent(String(sellerId))}`;
+    sellerLink.textContent = listing.seller_name || 'Student seller';
+    sellerRow.append(sellerLink);
+  } else {
+    sellerRow.append(createTextElement('span', '', listing.seller_name || 'Student seller'));
+  }
+  article.append(sellerRow);
   return article;
 }
 
@@ -602,6 +616,94 @@ function formatListingDate(value) {
   return new Intl.DateTimeFormat('en-GH', { dateStyle: 'medium' }).format(date);
 }
 
+function createSellerProfileState(title, message, stateClass) {
+  const state = document.createElement('div');
+  state.className = `seller-profile-state ${stateClass || ''}`.trim();
+  state.append(createTextElement('h1', '', title), createTextElement('p', '', message));
+  const back = document.createElement('a');
+  back.className = 'product-action';
+  back.href = 'index.html';
+  back.textContent = 'Back to marketplace';
+  state.append(back);
+  return state;
+}
+
+function createSellerProfile(profile) {
+  const layout = document.createElement('div');
+  layout.className = 'seller-profile-layout';
+
+  const header = document.createElement('header');
+  header.className = 'seller-profile-header';
+  const name = createTextElement('h1', '', profile.seller.name);
+  const badge = createTextElement('p', 'seller-profile-badge', 'Seller');
+  const count = profile.listings.length === 1 ? '1 active listing' : `${profile.listings.length} active listings`;
+  const listingCount = createTextElement('p', 'seller-profile-count', count);
+  header.append(name, badge, listingCount);
+
+  const listingsSection = document.createElement('section');
+  listingsSection.className = 'seller-profile-listings';
+  listingsSection.append(createTextElement('h2', '', 'Active listings'));
+
+  if (!profile.listings.length) {
+    const empty = document.createElement('div');
+    empty.className = 'seller-profile-empty';
+    empty.append(
+      createTextElement('h3', '', 'No active listings'),
+      createTextElement('p', 'meta', 'This Seller does not have any active listings right now.')
+    );
+    listingsSection.append(empty);
+  } else {
+    const grid = document.createElement('div');
+    grid.className = 'grid listings-grid';
+    grid.append(...profile.listings.map(createMarketplaceListingCard));
+    listingsSection.append(grid);
+  }
+
+  layout.append(header, listingsSection);
+  return layout;
+}
+
+async function loadSellerProfile() {
+  const container = document.getElementById('seller-profile');
+  if (!container) return;
+
+  const sellerId = new URLSearchParams(window.location.search).get('id');
+  if (!sellerId || !/^[1-9]\d*$/.test(sellerId) || !Number.isSafeInteger(Number(sellerId))) {
+    container.replaceChildren(createSellerProfileState(
+      'Seller not found',
+      'This Seller link is missing or invalid.',
+      'not-found'
+    ));
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/sellers/${encodeURIComponent(sellerId)}`);
+    const data = await response.json();
+
+    if (response.status === 404) {
+      container.replaceChildren(createSellerProfileState(
+        'Seller not found',
+        data.message || 'This Seller may no longer be available.',
+        'not-found'
+      ));
+      return;
+    }
+
+    if (!response.ok || !data.seller || !Array.isArray(data.listings)) {
+      throw new Error(data.message || 'Unable to load seller profile');
+    }
+
+    container.replaceChildren(createSellerProfile(data));
+  } catch (error) {
+    container.replaceChildren(createSellerProfileState(
+      'Seller unavailable',
+      error.message || 'Please try again.',
+      'error'
+    ));
+  }
+}
+
 function createProductDetail(listing) {
   const layout = document.createElement('article');
   layout.className = 'product-detail-layout';
@@ -635,15 +737,35 @@ function createProductDetail(listing) {
     ['Category', listing.category || 'General'],
     ['Condition', listing.condition || 'Not specified'],
     ['Delivery', listing.delivery_mode === 'delivery' ? 'Delivery' : 'Campus pickup'],
-    ['Location', listing.location || 'Campus'],
-    ['Seller', listing.seller_name || 'Student seller'],
-    ['Listed', formatListingDate(listing.created_at)]
+    ['Location', listing.location || 'Campus']
   ].forEach(([label, value]) => {
     if (!value) return;
     const term = createTextElement('dt', '', label);
     const description = createTextElement('dd', '', value);
     facts.append(term, description);
   });
+
+  const sellerTerm = createTextElement('dt', '', 'Seller');
+  const sellerDescription = document.createElement('dd');
+  const sellerId = Number(listing.seller_id);
+  if (Number.isSafeInteger(sellerId) && sellerId > 0) {
+    const sellerLink = document.createElement('a');
+    sellerLink.className = 'seller-profile-link';
+    sellerLink.href = `seller.html?id=${encodeURIComponent(String(sellerId))}`;
+    sellerLink.textContent = listing.seller_name || 'Student seller';
+    sellerDescription.append(sellerLink);
+  } else {
+    sellerDescription.textContent = listing.seller_name || 'Student seller';
+  }
+  facts.append(sellerTerm, sellerDescription);
+
+  const listed = formatListingDate(listing.created_at);
+  if (listed) {
+    facts.append(
+      createTextElement('dt', '', 'Listed'),
+      createTextElement('dd', '', listed)
+    );
+  }
   body.append(facts);
 
   const back = document.createElement('a');
@@ -1195,6 +1317,10 @@ function initPage() {
 
   if (document.getElementById('product-detail')) {
     loadProductDetail();
+  }
+
+  if (document.getElementById('seller-profile')) {
+    loadSellerProfile();
   }
 
   if (document.getElementById('jobs-grid')) {

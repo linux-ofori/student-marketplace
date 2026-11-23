@@ -554,7 +554,7 @@ async function run() {
   );
   await dbRun(
     'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [secondSeller.body.user.id, 'Campus Electronics Kit', 'A campus electronics kit for student study', 'Electronics', 10, 'Good', 'pickup', 'Campus', 'active', '2026-01-03 10:00:00']
+    [secondSeller.body.user.id, 'Campus Electronics Kit', 'A campus electronics kit for student study', 'Electronics', 10, 'Good', 'pickup', 'Campus', 'active', '2026-01-02 10:00:00']
   );
   await dbRun(
     'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -638,6 +638,7 @@ async function run() {
     'id',
     'location',
     'price',
+    'seller_id',
     'seller_name',
     'status',
     'title'
@@ -662,6 +663,88 @@ async function run() {
 
   const missingDetail = await request('/api/listings/999999999');
   assert(missingDetail.status === 404, 'Missing listing detail did not return HTTP 404');
+
+  const emptySeller = await signup('Empty Seller', 'empty-seller@campus.edu', 'seller');
+  assert(emptySeller.status === 201, 'Empty Seller signup failed');
+
+  const sellerProfile = await request(`/api/sellers/${secondSeller.body.user.id}`);
+  assert(sellerProfile.status === 200, 'Existing Seller profile failed');
+  assert(JSON.stringify(Object.keys(sellerProfile.body.seller).sort()) ===
+    JSON.stringify(['id', 'name']), 'Seller profile returned fields outside the public seller DTO');
+  assert(sellerProfile.body.seller.id === secondSeller.body.user.id, 'Seller profile returned the wrong Seller');
+  assert(sellerProfile.body.seller.name === secondSeller.body.user.name, 'Seller profile returned the wrong display name');
+  assert(JSON.stringify(Object.keys(sellerProfile.body).sort()) ===
+    JSON.stringify(['listings', 'seller']), 'Seller profile returned unexpected top-level fields');
+
+  assert(sellerProfile.body.listings.every((item) => item.seller_id === secondSeller.body.user.id),
+    'Seller profile included a listing owned by another Seller');
+  assert(sellerProfile.body.listings.every((item) => item.status === 'active'),
+    'Seller profile included a sold listing');
+  assert(!sellerProfile.body.listings.some((item) => item.title === 'Sold Study Desk'),
+    'Seller profile included the sold desk fixture');
+
+  const profileTieItems = sellerProfile.body.listings.filter((item) =>
+    item.created_at === '2026-01-02 10:00:00'
+  );
+  assert(profileTieItems.length >= 2 &&
+    profileTieItems[0].id > profileTieItems[1].id,
+    'Seller profile newest-first tie-breaking was not deterministic');
+  assert(sellerProfile.body.listings.every((item, index, items) =>
+    index === 0 || (
+      items[index - 1].created_at > item.created_at ||
+      (items[index - 1].created_at === item.created_at && items[index - 1].id > item.id)
+    )
+  ), 'Seller profile listings were not ordered newest first');
+
+  assert(sellerProfile.body.listings.every((item) =>
+    JSON.stringify(Object.keys(item).sort()) === JSON.stringify([
+      'category',
+      'condition',
+      'created_at',
+      'delivery_mode',
+      'description',
+      'id',
+      'location',
+      'price',
+      'seller_id',
+      'seller_name',
+      'status',
+      'title'
+    ])
+  ), 'Seller profile listing DTO did not return the exact public key set');
+  assert(sellerProfile.body.listings.every((item) =>
+    !Object.prototype.hasOwnProperty.call(item, 'email') &&
+    !Object.prototype.hasOwnProperty.call(item, 'password_hash') &&
+    !Object.prototype.hasOwnProperty.call(item, 'role') &&
+    !Object.prototype.hasOwnProperty.call(item, 'student_verified')
+  ), 'Seller profile listing exposed private account fields');
+
+  const emptySellerProfile = await request(`/api/sellers/${emptySeller.body.user.id}`);
+  assert(emptySellerProfile.status === 200, 'Seller with no active listings did not return HTTP 200');
+  assert(Array.isArray(emptySellerProfile.body.listings) && emptySellerProfile.body.listings.length === 0,
+    'Seller with no active listings did not return an empty array');
+
+  const missingSellerProfile = await request('/api/sellers/999999999');
+  assert(missingSellerProfile.status === 404, 'Missing numeric Seller ID did not return HTTP 404');
+
+  const buyerSellerProfile = await request(`/api/sellers/${buyer.body.user.id}`);
+  assert(buyerSellerProfile.status === 404, 'Buyer account was exposed as a Seller profile');
+
+  for (const invalidSellerId of ['abc', '0', '-1', '1.5', '9007199254740992', '']) {
+    const invalidSellerProfile = await request(
+      invalidSellerId ? `/api/sellers/${encodeURIComponent(invalidSellerId)}` : '/api/sellers/'
+    );
+    assert(invalidSellerProfile.status === (invalidSellerId ? 400 : 404),
+      `Seller ID '${invalidSellerId}' returned the wrong status`);
+  }
+
+  const publicBrowseSellerId = publicListings.body.listings.every((item) =>
+    Number.isSafeInteger(item.seller_id) && item.seller_id > 0
+  );
+  assert(publicBrowseSellerId, 'Public browse listings omitted a valid seller_id');
+  assert(Number.isSafeInteger(publicDetail.body.listing.seller_id) &&
+    publicDetail.body.listing.seller_id > 0,
+    'Public detail listing omitted a valid seller_id');
 
   const buyerBeforeUpgrade = await dbGet('SELECT id, email, password_hash, student_verified, role FROM users WHERE email = ?', ['buyer@example.com']);
   assert(buyerBeforeUpgrade, 'Buyer account was not found');

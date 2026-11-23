@@ -300,6 +300,7 @@ function getPublicListing(listing) {
   if (!listing) return null;
   return {
     id: listing.id,
+    seller_id: listing.seller_id,
     title: listing.title,
     description: listing.description,
     category: listing.category,
@@ -711,7 +712,8 @@ app.get('/api/listings', async (req, res) => {
 
   let sql = `
     SELECT l.id, l.title, l.description, l.category, l.price, l.condition,
-           l.delivery_mode, l.location, l.status, l.created_at, u.name AS seller_name
+           l.delivery_mode, l.location, l.status, l.created_at,
+           l.user_id AS seller_id, u.name AS seller_name
     FROM listings l
     JOIN users u ON u.id = l.user_id
     WHERE l.status = 'active'
@@ -746,7 +748,8 @@ app.get('/api/listings/:id', async (req, res) => {
   try {
     const listing = await getQuery(
       `SELECT l.id, l.title, l.description, l.category, l.price, l.condition,
-              l.delivery_mode, l.location, l.status, l.created_at, u.name AS seller_name
+              l.delivery_mode, l.location, l.status, l.created_at,
+              l.user_id AS seller_id, u.name AS seller_name
        FROM listings l
        JOIN users u ON u.id = l.user_id
        WHERE l.id = ?`,
@@ -761,6 +764,46 @@ app.get('/api/listings/:id', async (req, res) => {
   } catch (error) {
     console.error('Get listing error:', error);
     return res.status(500).json({ message: 'Could not fetch listing.' });
+  }
+});
+
+app.get('/api/sellers/:id', async (req, res) => {
+  const { id } = req.params;
+
+  if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
+    return res.status(400).json({ message: 'Invalid seller ID.' });
+  }
+
+  const sellerId = Number(id);
+
+  try {
+    const seller = await getQuery(
+      'SELECT id, name FROM users WHERE id = ? AND role = ?',
+      [sellerId, 'seller']
+    );
+
+    if (!seller) {
+      return res.status(404).json({ message: 'Seller not found.' });
+    }
+
+    const listings = await allQuery(
+      `SELECT l.id, l.title, l.description, l.category, l.price, l.condition,
+              l.delivery_mode, l.location, l.status, l.created_at,
+              l.user_id AS seller_id, u.name AS seller_name
+       FROM listings l
+       JOIN users u ON u.id = l.user_id
+       WHERE l.user_id = ? AND l.status = 'active'
+       ORDER BY l.created_at DESC, l.id DESC`,
+      [sellerId]
+    );
+
+    return res.json({
+      seller: { id: seller.id, name: seller.name },
+      listings: listings.map(getPublicListing)
+    });
+  } catch (error) {
+    console.error('Get seller profile error:', error);
+    return res.status(500).json({ message: 'Could not fetch seller profile.' });
   }
 });
 

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seller Profile - Student Marketplace</title>
+    <link rel="stylesheet" href="styles.css">
+    <meta name="description" content="View a Seller's active listings on Student Marketplace.">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container navigate">
+            <a class="logo" href="index.html">StudentMarket</a>
+            <nav class="main-nav" aria-label="Main navigation">
+                <a href="index.html">Marketplace</a>
+                <a id="seller-nav-link" href="sell.html" class="hidden-when-logged-out">Sell</a>
+                <a href="jobs.html">Jobs</a>
+                <a id="dashboard-link" href="dashboard.html" class="hidden-when-logged-out">Dashboard</a>
+                <a href="about.html">About</a>
+                <a id="auth-link" href="login.html">Login</a>
+                <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode">
+                    <span class="theme-toggle-icon">🌙</span>
+                    <span class="theme-toggle-text">Dark</span>
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="container seller-profile-shell">
+            <a class="back-link" href="index.html">← Back to marketplace</a>
+            <div id="seller-profile" class="seller-profile" aria-live="polite">
+                <div class="marketplace-state">Loading seller profile...</div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <p>© 2026 Student Marketplace — <a href="about.html#contact">Contact</a> • <a href="terms.html">Terms</a></p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
