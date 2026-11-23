@@ -5,6 +5,12 @@ let currentUserRequest = null;
 let dashboardRequestSequence = 0;
 let authenticationAttemptSequence = 0;
 let marketplaceRequestSequence = 0;
+let conversationListRequestSequence = 0;
+let messageRequestSequence = 0;
+let olderMessageRequestSequence = 0;
+const pendingConversationSends = new Set();
+const pendingConversationMessages = new Map();
+const pendingConversationSendErrors = new Map();
 
 function beginAuthenticationAttempt() {
   authenticationAttemptSequence += 1;
@@ -119,12 +125,16 @@ function clearAuthenticationState(expectedToken) {
 function updateAuthNav() {
   const authLink = document.getElementById('auth-link');
   const dashboardLink = document.getElementById('dashboard-link');
+  const messagesLinks = document.querySelectorAll('a[href="messages.html"]');
   const sellerLinks = document.querySelectorAll('a[href="sell.html"]');
   const token = localStorage.getItem('student-market-token');
 
   if (dashboardLink) {
     dashboardLink.classList.add('hidden-when-logged-out');
   }
+  messagesLinks.forEach((link) => {
+    link.classList.add('hidden-when-logged-out');
+  });
 
   sellerLinks.forEach((link) => {
     link.classList.add('hidden-when-logged-out');
@@ -156,6 +166,9 @@ function updateAuthNav() {
     };
 
     if (dashboardLink) dashboardLink.classList.remove('hidden-when-logged-out');
+    messagesLinks.forEach((link) => {
+      link.classList.remove('hidden-when-logged-out');
+    });
     const isSeller = authState.user.role === 'seller';
     sellerLinks.forEach((link) => {
       link.classList.toggle('hidden-when-logged-out', !isSeller);
@@ -616,6 +629,520 @@ function formatListingDate(value) {
   return new Intl.DateTimeFormat('en-GH', { dateStyle: 'medium' }).format(date);
 }
 
+function formatMessageDate(value) {
+  const date = new Date(String(value || ''));
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-GH', {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(date);
+}
+
+let activeConversationId = null;
+let activeMessageNextCursor = null;
+
+function getAuthErrorMessage(responseStatus, data, fallback) {
+  if (responseStatus === 401) return 'Your session has expired. Please log in again.';
+  if (responseStatus === 404) return 'Conversation not found.';
+  if (responseStatus === 409) return data.message || 'This conversation is read-only.';
+  if (responseStatus === 429) return data.message || 'Message rate limit exceeded.';
+  return data.message || fallback;
+}
+
+async function loadConversationList(append = false, cursor = null) {
+  const list = document.getElementById('conversation-list');
+  if (!list) return;
+  const requestId = ++conversationListRequestSequence;
+  const token = localStorage.getItem('student-market-token');
+
+  if (!append) {
+    list.replaceChildren(createTextElement('p', 'conversation-list-loading', 'Loading conversations...'));
+  }
+
+  const params = new URLSearchParams();
+  params.set('limit', '20');
+  if (cursor) {
+    params.set('beforeUpdatedAt', cursor.beforeUpdatedAt);
+    params.set('beforeId', String(cursor.beforeId));
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/conversations?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await response.json();
+    if (requestId !== conversationListRequestSequence) return;
+    if (response.status === 401) {
+      clearAuthenticationState(token);
+      window.location.href = 'login.html';
+      return;
+    }
+    if (!response.ok) throw new Error(data.message || 'Unable to load conversations.');
+
+    if (!append) list.replaceChildren();
+
+    if (!append && !data.conversations.length) {
+      const empty = document.createElement('div');
+      empty.className = 'conversation-list-empty';
+      empty.append(
+        createTextElement('strong', '', 'No conversations yet'),
+        createTextElement('p', 'meta', 'Start an enquiry from an active listing.')
+      );
+      list.append(empty);
+    } else {
+      data.conversations.forEach((conversation) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'conversation-list-item';
+        button.dataset.conversationId = String(conversation.id);
+        if (conversation.id === activeConversationId) button.classList.add('active');
+
+        button.append(
+          createTextElement('strong', '', conversation.listing_title),
+          createTextElement('span', 'conversation-participant', conversation.other_participant?.name || 'Student'),
+          createTextElement('small', '', formatMessageDate(conversation.last_activity))
+        );
+        if (conversation.read_only) {
+          button.append(createTextElement('small', 'conversation-read-only', 'Listing deleted'));
+        }
+        button.addEventListener('click', () => {
+          window.history.replaceState({}, '', `messages.html?id=${encodeURIComponent(String(conversation.id))}`);
+          openConversation(conversation.id);
+        });
+        list.append(button);
+      });
+    }
+
+    const loadMore = document.getElementById('conversation-load-more');
+    if (loadMore) {
+      loadMore.hidden = !data.nextCursor;
+      loadMore.dataset.cursor = data.nextCursor ? JSON.stringify(data.nextCursor) : '';
+    }
+  } catch (error) {
+    if (requestId !== conversationListRequestSequence) return;
+    list.replaceChildren();
+    const state = document.createElement('div');
+    state.className = 'conversation-list-error';
+    state.append(createTextElement('strong', '', 'Could not load conversations'), createTextElement('p', 'meta', error.message));
+    list.append(state);
+  }
+}
+
+function appendMessage(message, currentUserId) {
+  const history = document.getElementById('message-history');
+  if (!history) return;
+  const messageId = message.id === undefined || message.id === null
+    ? null
+    : String(message.id);
+  if (messageId && Array.from(history.children).some((item) => item.dataset.messageId === messageId)) {
+    return;
+  }
+
+  const senderId = Number(message.sender?.id);
+  const article = document.createElement('article');
+  article.className = 'message-bubble';
+  if (messageId) article.dataset.messageId = messageId;
+  article.classList.add(senderId === currentUserId ? 'message-own' : 'message-other');
+  article.append(
+    createTextElement('strong', 'message-sender', message.sender?.name || 'Student'),
+    createTextElement('p', 'message-content', message.content),
+    createTextElement('small', 'message-time', formatMessageDate(message.created_at))
+  );
+  history.append(article);
+}
+
+function appendSentMessageToActiveConversation(conversationId, message, currentUserId) {
+  if (Number(conversationId) !== activeConversationId) return;
+
+  const history = document.getElementById('message-history');
+  if (history) {
+    appendMessage(message, currentUserId);
+    return;
+  }
+
+  const key = String(conversationId);
+  const pendingMessages = pendingConversationMessages.get(key) || [];
+  if (!pendingMessages.some((pending) => String(pending.id) === String(message.id))) {
+    pendingMessages.push(message);
+    pendingConversationMessages.set(key, pendingMessages);
+  }
+}
+
+function appendPendingConversationMessages(conversationId, currentUserId) {
+  const key = String(conversationId);
+  const pendingMessages = pendingConversationMessages.get(key);
+  if (!pendingMessages) return;
+
+  pendingMessages.forEach((message) => appendMessage(message, currentUserId));
+  pendingConversationMessages.delete(key);
+}
+
+function showConversationSendError(conversationId, message) {
+  if (Number(conversationId) !== activeConversationId) return;
+  const status = document.getElementById('message-status');
+  if (!status) {
+    pendingConversationSendErrors.set(String(conversationId), message);
+    return;
+  }
+  status.textContent = message;
+  status.className = 'form-status dashboard-status-error';
+}
+
+function showPendingConversationSendError(conversationId) {
+  const key = String(conversationId);
+  if (!pendingConversationSendErrors.has(key)) return;
+  const status = document.getElementById('message-status');
+  if (!status) return;
+  status.textContent = pendingConversationSendErrors.get(key);
+  status.className = 'form-status dashboard-status-error';
+  pendingConversationSendErrors.delete(key);
+}
+
+async function loadOlderMessages() {
+  if (!activeConversationId || !activeMessageNextCursor) return;
+  const button = document.getElementById('load-older-messages');
+  if (button?.disabled) return;
+  const conversationId = activeConversationId;
+  const conversationSequence = messageRequestSequence;
+  const requestId = ++olderMessageRequestSequence;
+  const cursor = activeMessageNextCursor;
+  if (button) button.disabled = true;
+  const token = localStorage.getItem('student-market-token');
+  const params = new URLSearchParams();
+  params.set('limit', '30');
+  params.set('beforeCreatedAt', cursor.beforeCreatedAt);
+  params.set('beforeId', String(cursor.beforeId));
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/conversations/${encodeURIComponent(String(conversationId))}/messages?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const data = await response.json();
+    if (response.status === 401) {
+      clearAuthenticationState(token);
+      window.location.href = 'login.html';
+      return;
+    }
+    if (!response.ok) throw new Error(data.message || 'Unable to load older messages.');
+
+    const authState = await getCurrentUser();
+    if (
+      conversationId !== activeConversationId ||
+      conversationSequence !== messageRequestSequence ||
+      requestId !== olderMessageRequestSequence
+    ) return;
+
+    const history = document.getElementById('message-history');
+    const loadingMarker = history?.querySelector('.message-loading-marker');
+    if (history && loadingMarker) loadingMarker.remove();
+    const page = data.messages || [];
+    if (history) {
+      const fragment = document.createDocumentFragment();
+      page.forEach((message) => {
+        const senderId = Number(message.sender?.id);
+        const article = document.createElement('article');
+        article.className = `message-bubble ${senderId === authState.user?.id ? 'message-own' : 'message-other'}`;
+        article.dataset.messageId = String(message.id);
+        article.append(
+          createTextElement('strong', 'message-sender', message.sender?.name || 'Student'),
+          createTextElement('p', 'message-content', message.content),
+          createTextElement('small', 'message-time', formatMessageDate(message.created_at))
+        );
+        fragment.append(article);
+      });
+      history.insertBefore(fragment, history.firstChild);
+    }
+    activeMessageNextCursor = data.nextCursor || null;
+    if (button) button.hidden = !activeMessageNextCursor;
+  } catch (error) {
+    if (
+      conversationId !== activeConversationId ||
+      conversationSequence !== messageRequestSequence ||
+      requestId !== olderMessageRequestSequence
+    ) return;
+    const status = document.getElementById('message-status');
+    if (status) {
+      status.textContent = error.message || 'Unable to load older messages.';
+      status.className = 'form-status dashboard-status-error';
+    }
+  } finally {
+    if (button && requestId === olderMessageRequestSequence) button.disabled = false;
+  }
+}
+
+async function openConversation(conversationId) {
+  const container = document.getElementById('message-thread');
+  if (!container) return;
+  const nextConversationId = Number(conversationId);
+  if (activeConversationId !== null && activeConversationId !== nextConversationId) {
+    pendingConversationSendErrors.delete(String(activeConversationId));
+  }
+  activeConversationId = nextConversationId;
+  activeMessageNextCursor = null;
+  const requestId = ++messageRequestSequence;
+  const token = localStorage.getItem('student-market-token');
+  container.replaceChildren(createTextElement('p', 'message-loading', 'Loading conversation...'));
+
+  try {
+    const headers = { Authorization: `Bearer ${token}` };
+    const detailResponse = await fetch(`${API_BASE}/conversations/${encodeURIComponent(String(conversationId))}`, { headers });
+    const detailData = await detailResponse.json();
+    if (requestId !== messageRequestSequence) return;
+    if (detailResponse.status === 401) {
+      clearAuthenticationState(token);
+      window.location.href = 'login.html';
+      return;
+    }
+    if (detailResponse.status === 404) throw new Error('Conversation not found.');
+    if (!detailResponse.ok) throw new Error(detailData.message || 'Unable to load conversation.');
+
+    const messageParams = new URLSearchParams();
+    messageParams.set('limit', '30');
+    const messageResponse = await fetch(
+      `${API_BASE}/conversations/${encodeURIComponent(String(conversationId))}/messages?${messageParams.toString()}`,
+      { headers }
+    );
+    const messageData = await messageResponse.json();
+    if (messageResponse.status === 401) {
+      clearAuthenticationState(token);
+      window.location.href = 'login.html';
+      return;
+    }
+    if (requestId !== messageRequestSequence) return;
+    if (!messageResponse.ok) throw new Error(messageData.message || 'Unable to load messages.');
+
+    const authState = await getCurrentUser();
+    if (requestId !== messageRequestSequence) return;
+    container.replaceChildren();
+
+    const header = document.createElement('header');
+    header.className = 'message-thread-header';
+    header.append(
+      createTextElement('h1', '', detailData.conversation.listing_title),
+      createTextElement('p', 'meta', `Conversation with ${detailData.conversation.other_participant?.name || 'Student'}`)
+    );
+    if (detailData.conversation.read_only) {
+      header.append(createTextElement('p', 'message-read-only', 'This listing was deleted. This conversation is read-only.'));
+    }
+
+    const loadOlder = document.createElement('button');
+    loadOlder.type = 'button';
+    loadOlder.id = 'load-older-messages';
+    loadOlder.className = 'message-load-older';
+    loadOlder.textContent = 'Load older messages';
+    loadOlder.hidden = !messageData.nextCursor;
+    loadOlder.addEventListener('click', loadOlderMessages);
+
+    const history = document.createElement('div');
+    history.id = 'message-history';
+    history.className = 'message-history';
+
+    const composer = document.createElement('form');
+    composer.className = 'message-composer';
+    composer.id = 'message-composer';
+    const input = document.createElement('textarea');
+    input.name = 'content';
+    input.rows = 3;
+    input.maxLength = 2000;
+    input.required = true;
+    input.placeholder = 'Write a message...';
+    input.setAttribute('aria-label', 'Message');
+    const send = document.createElement('button');
+    send.type = 'submit';
+    send.textContent = 'Send';
+    const status = document.createElement('p');
+    status.id = 'message-status';
+    status.className = 'form-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    composer.append(input, send, status);
+
+    if (detailData.conversation.read_only) {
+      input.disabled = true;
+      send.disabled = true;
+    }
+
+    composer.addEventListener('submit', (event) =>
+      sendConversationMessage(event, Number(conversationId), composer, input, send, status)
+    );
+
+    container.append(header, loadOlder, history, composer);
+    (messageData.messages || []).forEach((message) => appendMessage(message, authState.user?.id));
+    appendPendingConversationMessages(conversationId, authState.user?.id);
+    showPendingConversationSendError(conversationId);
+    activeMessageNextCursor = messageData.nextCursor || null;
+  } catch (error) {
+    if (requestId !== messageRequestSequence) return;
+    container.replaceChildren(createConversationState(
+      'Conversation unavailable',
+      error.message || 'Please try again.',
+      'error'
+    ));
+  }
+}
+
+function createConversationState(title, message, stateClass) {
+  const state = document.createElement('div');
+  state.className = `conversation-thread-state ${stateClass || ''}`.trim();
+  state.append(
+    createTextElement('h1', '', title),
+    createTextElement('p', '', message)
+  );
+  return state;
+}
+
+async function sendConversationMessage(event, conversationId, form, input, send, status) {
+  event.preventDefault();
+  const conversationKey = String(conversationId);
+  if (pendingConversationSends.has(conversationKey)) return;
+  const conversationSequence = messageRequestSequence;
+  const isCurrentConversation = () =>
+    conversationId === activeConversationId &&
+    conversationSequence === messageRequestSequence;
+  const content = input.value.trim();
+  if (!content) {
+    status.textContent = 'Enter a message.';
+    status.className = 'form-status dashboard-status-error';
+    input.focus();
+    return;
+  }
+  if (Array.from(content).length > 2000) {
+    status.textContent = 'Messages can be at most 2,000 characters.';
+    status.className = 'form-status dashboard-status-error';
+    return;
+  }
+
+  pendingConversationSends.add(conversationKey);
+  let keepComposerDisabled = false;
+  let refreshInboxAfterSend = false;
+  input.disabled = true;
+  send.disabled = true;
+  status.textContent = 'Sending...';
+  status.className = 'form-status';
+  const token = localStorage.getItem('student-market-token');
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/conversations/${encodeURIComponent(String(conversationId))}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ content })
+      }
+    );
+    const data = await response.json();
+    if (response.status === 401) {
+      clearAuthenticationState(token);
+      window.location.href = 'login.html';
+      return;
+    }
+    if (!response.ok) {
+      if (conversationId !== activeConversationId) return;
+      if (response.status === 404) throw new Error(data.message || 'Conversation not found.');
+      if (response.status === 409) {
+        keepComposerDisabled = true;
+        throw new Error(data.message || 'This conversation is read-only.');
+      }
+      if (response.status === 429) {
+        const retry = data.retryAfterSeconds || response.headers.get('Retry-After');
+        throw new Error(retry
+          ? `${data.message || 'Message rate limit exceeded.'} Retry in ${retry} seconds.`
+          : data.message || 'Message rate limit exceeded.');
+      }
+      throw new Error(data.message || 'Unable to send message.');
+    }
+
+    refreshInboxAfterSend = true;
+    if (conversationId === activeConversationId) {
+      const authState = await getCurrentUser();
+      appendSentMessageToActiveConversation(conversationId, data.message, authState.user?.id);
+    }
+    if (isCurrentConversation()) {
+      input.value = '';
+      status.textContent = 'Message sent.';
+      status.className = 'form-status';
+    }
+    await loadConversationList(false);
+    refreshInboxAfterSend = false;
+  } catch (error) {
+    showConversationSendError(conversationId, error.message || 'Unable to send message.');
+  } finally {
+    if (refreshInboxAfterSend) loadConversationList(false);
+    pendingConversationSends.delete(conversationKey);
+    if (!keepComposerDisabled) {
+      input.disabled = false;
+      send.disabled = false;
+    }
+  }
+}
+
+async function loadMessagesPage() {
+  const token = localStorage.getItem('student-market-token');
+  if (!token) {
+    window.location.href = 'login.html';
+    return;
+  }
+
+  try {
+    const authState = await getCurrentUser();
+    if (authState.unauthorized || !authState.user) {
+      window.location.href = 'login.html';
+      return;
+    }
+
+    await loadConversationList(false);
+
+    const conversationLoadMore = document.getElementById('conversation-load-more');
+    if (conversationLoadMore) {
+      conversationLoadMore.addEventListener('click', () => {
+        if (!conversationLoadMore.dataset.cursor) return;
+        let cursor;
+        try {
+          cursor = JSON.parse(conversationLoadMore.dataset.cursor);
+        } catch (error) {
+          return;
+        }
+        loadConversationList(true, cursor);
+      });
+    }
+
+    const directId = new URLSearchParams(window.location.search).get('id');
+    if (directId) {
+      await openConversation(directId);
+      return;
+    }
+
+    const first = document.querySelector('#conversation-list .conversation-list-item');
+    if (first) {
+      const conversationId = first.dataset.conversationId;
+      await openConversation(conversationId);
+      window.history.replaceState({}, '', `messages.html?id=${encodeURIComponent(conversationId)}`);
+    } else {
+      const thread = document.getElementById('message-thread');
+      if (thread) {
+        thread.replaceChildren(createConversationState(
+          'No conversations',
+          'Start an enquiry from an active listing.',
+          'empty'
+        ));
+      }
+    }
+  } catch (error) {
+    const thread = document.getElementById('message-thread');
+    if (thread) {
+      thread.replaceChildren(createConversationState(
+        'Messages unavailable',
+        error.message || 'Please try again.',
+        'error'
+      ));
+    }
+  }
+}
+
 function createSellerProfileState(title, message, stateClass) {
   const state = document.createElement('div');
   state.className = `seller-profile-state ${stateClass || ''}`.trim();
@@ -704,6 +1231,126 @@ async function loadSellerProfile() {
   }
 }
 
+function createEnquiryAction(listing) {
+  const action = document.createElement('div');
+  action.className = 'product-enquiry-action';
+
+  const showSoldState = () => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'product-action';
+    button.disabled = true;
+    button.textContent = 'Enquiries unavailable';
+    action.append(
+      createTextElement('p', 'sold-message', 'This listing is sold, so new enquiries are unavailable.'),
+      button
+    );
+  };
+
+  const loading = createTextElement('p', 'meta', 'Checking enquiry access...');
+  action.append(loading);
+  const token = localStorage.getItem('student-market-token');
+  if (!token) {
+    action.replaceChildren();
+    if (listing.status === 'sold') {
+      showSoldState();
+      return action;
+    }
+    action.append(
+      createTextElement('p', 'meta', 'Log in to send an enquiry to this Seller.'),
+      (() => {
+        const login = document.createElement('a');
+        login.className = 'product-action';
+        login.href = 'login.html';
+        login.textContent = 'Log in to enquire';
+        return login;
+      })()
+    );
+    return action;
+  }
+
+  getCurrentUser().then((authState) => {
+    if (authState.unauthorized || !authState.user) {
+      action.replaceChildren();
+      if (listing.status === 'sold') {
+        showSoldState();
+        return;
+      }
+      action.append(
+        createTextElement('p', 'meta', 'Log in to send an enquiry to this Seller.')
+      );
+      const login = document.createElement('a');
+      login.className = 'product-action';
+      login.href = 'login.html';
+      login.textContent = 'Log in to enquire';
+      action.append(login);
+      return;
+    }
+
+    action.replaceChildren();
+    if (Number(listing.seller_id) === authState.user.id) {
+      action.append(createTextElement('p', 'meta', 'This is your listing.'));
+      return;
+    }
+    if (listing.status === 'sold') {
+      showSoldState();
+      return;
+    }
+    if (authState.user.role !== 'buyer') {
+      action.append(createTextElement('p', 'meta', 'Only Buyer accounts can start enquiries.'));
+      return;
+    }
+
+    const status = createTextElement('p', 'form-status', '');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'product-action';
+    button.textContent = 'Enquire about this listing';
+    button.addEventListener('click', async () => {
+      if (button.dataset.submitting === 'true') return;
+      button.dataset.submitting = 'true';
+      button.disabled = true;
+      status.textContent = 'Opening enquiry...';
+      status.className = 'form-status';
+
+      try {
+        const response = await fetch(`${API_BASE}/listings/${encodeURIComponent(String(listing.id))}/conversations`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await response.json();
+        if (response.status === 401) {
+          clearAuthenticationState(token);
+          window.location.href = 'login.html';
+          return;
+        }
+        if (response.status === 409) {
+          throw new Error(data.message || 'You cannot start a new enquiry for this listing.');
+        }
+        if (!response.ok || !data.conversation?.id) {
+          throw new Error(data.message || 'Unable to open conversation.');
+        }
+        window.location.href = `messages.html?id=${encodeURIComponent(String(data.conversation.id))}`;
+      } catch (error) {
+        status.textContent = error.message || 'Unable to open conversation.';
+        status.className = 'form-status dashboard-status-error';
+      } finally {
+        button.dataset.submitting = 'false';
+        button.disabled = false;
+      }
+    });
+    action.append(button, status);
+  }).catch(() => {
+    action.replaceChildren();
+    if (listing.status === 'sold') showSoldState();
+    else action.append(createTextElement('p', 'meta', 'Unable to verify enquiry access right now.'));
+  });
+
+  return action;
+}
+
 function createProductDetail(listing) {
   const layout = document.createElement('article');
   layout.className = 'product-detail-layout';
@@ -767,6 +1414,7 @@ function createProductDetail(listing) {
     );
   }
   body.append(facts);
+  body.append(createEnquiryAction(listing));
 
   const back = document.createElement('a');
   back.className = 'product-action';
@@ -1321,6 +1969,10 @@ function initPage() {
 
   if (document.getElementById('seller-profile')) {
     loadSellerProfile();
+  }
+
+  if (document.getElementById('messages-page')) {
+    loadMessagesPage();
   }
 
   if (document.getElementById('jobs-grid')) {

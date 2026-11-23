@@ -314,6 +314,39 @@ function getPublicListing(listing) {
   };
 }
 
+function utcNow() {
+  return new Date().toISOString();
+}
+
+function isPositiveDecimal(value) {
+  return typeof value === 'string' &&
+    /^[1-9]\d*$/.test(value) &&
+    Number.isSafeInteger(Number(value));
+}
+
+function parseLimit(value, defaultLimit = 20) {
+  if (value === undefined) return { value: defaultLimit };
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {
+    return { error: 'Limit must be a positive integer.' };
+  }
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit > 100) {
+    return { error: 'Limit must not exceed 100.' };
+  }
+  return { value: limit };
+}
+
+function parseIsoCursor(value, label) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    return { error: `${label} cursor is malformed.` };
+  }
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime()) || timestamp.toISOString() !== value) {
+    return { error: `${label} cursor is malformed.` };
+  }
+  return { value };
+}
+
 function validateListingInput(input, partial = false) {
   const errors = [];
   const values = {};
@@ -453,6 +486,49 @@ async function initializeDatabase() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await runQuery(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      listing_id INTEGER,
+      listing_title_snapshot TEXT NOT NULL,
+      buyer_id INTEGER NOT NULL,
+      seller_id INTEGER NOT NULL,
+      read_only INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE SET NULL,
+      FOREIGN KEY (buyer_id) REFERENCES users(id),
+      FOREIGN KEY (seller_id) REFERENCES users(id),
+      CHECK (buyer_id != seller_id),
+      CHECK (read_only IN (0, 1))
+    )
+  `);
+
+  await runQuery(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL,
+      sender_id INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY (sender_id) REFERENCES users(id),
+      CHECK (length(trim(content)) > 0),
+      CHECK (length(content) <= 2000)
+    )
+  `);
+
+  await runQuery(`
+    CREATE UNIQUE INDEX IF NOT EXISTS conversations_listing_buyer_unique
+    ON conversations(listing_id, buyer_id)
+    WHERE listing_id IS NOT NULL
+  `);
+  await runQuery('CREATE INDEX IF NOT EXISTS conversations_buyer_activity ON conversations(buyer_id, updated_at DESC, id DESC)');
+  await runQuery('CREATE INDEX IF NOT EXISTS conversations_seller_activity ON conversations(seller_id, updated_at DESC, id DESC)');
+  await runQuery('CREATE INDEX IF NOT EXISTS conversations_listing ON conversations(listing_id)');
+  await runQuery('CREATE INDEX IF NOT EXISTS messages_history ON messages(conversation_id, created_at DESC, id DESC)');
+  await runQuery('CREATE INDEX IF NOT EXISTS messages_sender_created ON messages(sender_id, created_at DESC)');
 
   const foreignKeyViolations = await allQuery('PRAGMA foreign_key_check');
   if (foreignKeyViolations.length) {
@@ -807,6 +883,425 @@ app.get('/api/sellers/:id', async (req, res) => {
   }
 });
 
+function getConversationPublic(conversation, currentUserId) {
+  const isBuyer = conversation.buyer_id === currentUserId;
+  const otherParticipant = isBuyer
+    ? { id: conversation.seller_id, name: conversation.seller_name }
+    : { id: conversation.buyer_id, name: conversation.buyer_name };
+
+  return {
+    id: conversation.id,
+    listing_id: conversation.listing_id,
+    listing_title: conversation.listing_title_snapshot,
+    other_participant: otherParticipant,
+    last_activity: conversation.updated_at,
+    read_only: Boolean(conversation.read_only)
+  };
+}
+
+function parseConversationCursor(reqQuery) {
+  const limitResult = parseLimit(reqQuery.limit, 20);
+  if (limitResult.error) return { error: limitResult.error };
+
+  const beforeUpdatedAt = reqQuery.beforeUpdatedAt;
+  const beforeId = reqQuery.beforeId;
+  if ((beforeUpdatedAt === undefined) !== (beforeId === undefined)) {
+    return { error: 'beforeUpdatedAt and beforeId must be provided together.' };
+  }
+
+  if (beforeUpdatedAt === undefined) {
+    return { limit: limitResult.value };
+  }
+
+  const timestampResult = parseIsoCursor(beforeUpdatedAt, 'beforeUpdatedAt');
+  if (timestampResult.error) return timestampResult;
+  if (typeof beforeId !== 'string' || !isPositiveDecimal(beforeId)) {
+    return { error: 'beforeId cursor is malformed.' };
+  }
+
+  return {
+    limit: limitResult.value,
+    beforeUpdatedAt: timestampResult.value,
+    beforeId: Number(beforeId)
+  };
+}
+
+function parseMessageCursor(reqQuery) {
+  const limitResult = parseLimit(reqQuery.limit, 30);
+  if (limitResult.error) return { error: limitResult.error };
+
+  const beforeCreatedAt = reqQuery.beforeCreatedAt;
+  const beforeId = reqQuery.beforeId;
+  if ((beforeCreatedAt === undefined) !== (beforeId === undefined)) {
+    return { error: 'beforeCreatedAt and beforeId must be provided together.' };
+  }
+
+  if (beforeCreatedAt === undefined) {
+    return { limit: limitResult.value };
+  }
+
+  const timestampResult = parseIsoCursor(beforeCreatedAt, 'beforeCreatedAt');
+  if (timestampResult.error) return timestampResult;
+  if (typeof beforeId !== 'string' || !isPositiveDecimal(beforeId)) {
+    return { error: 'beforeId cursor is malformed.' };
+  }
+
+  return {
+    limit: limitResult.value,
+    beforeCreatedAt: timestampResult.value,
+    beforeId: Number(beforeId)
+  };
+}
+
+app.post('/api/listings/:listingId/conversations', authMiddleware, async (req, res) => {
+  const { listingId } = req.params;
+  if (!isPositiveDecimal(listingId)) {
+    return res.status(400).json({ message: 'Invalid listing ID.' });
+  }
+
+  if (req.user.role !== 'buyer') {
+    return res.status(403).json({ message: 'Buyer account required.' });
+  }
+
+  const numericListingId = Number(listingId);
+
+  try {
+    const result = await withTransaction(async () => {
+      const listing = await getQuery(
+        'SELECT id, user_id, title, status FROM listings WHERE id = ?',
+        [numericListingId]
+      );
+      if (!listing) return { status: 404, body: { message: 'Listing not found.' } };
+      if (listing.user_id === req.user.id) {
+        return { status: 409, body: { message: 'You cannot enquire about your own listing.' } };
+      }
+      if (listing.status === 'sold') {
+        return { status: 409, body: { message: 'This listing is sold.' } };
+      }
+
+      const existing = await getQuery(
+        'SELECT id FROM conversations WHERE listing_id = ? AND buyer_id = ?',
+        [numericListingId, req.user.id]
+      );
+      if (existing) {
+        const conversation = await getQuery(
+          `SELECT c.*, bu.name AS buyer_name, su.name AS seller_name
+           FROM conversations c
+           JOIN users bu ON bu.id = c.buyer_id
+           JOIN users su ON su.id = c.seller_id
+           WHERE c.id = ?`,
+          [existing.id]
+        );
+        return {
+          status: 200,
+          body: {
+            created: false,
+            conversation: getConversationPublic(conversation, req.user.id)
+          }
+        };
+      }
+
+      const timestamp = utcNow();
+      const insertedConversation = await runQuery(
+        `INSERT OR IGNORE INTO conversations
+         (listing_id, listing_title_snapshot, buyer_id, seller_id, read_only, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 0, ?, ?)`,
+        [numericListingId, listing.title, req.user.id, listing.user_id, timestamp, timestamp]
+      );
+
+      const conversationRow = await getQuery(
+        'SELECT id FROM conversations WHERE listing_id = ? AND buyer_id = ?',
+        [numericListingId, req.user.id]
+      );
+      if (!conversationRow) {
+        throw new Error('Conversation creation failed.');
+      }
+
+      const conversation = await getQuery(
+        `SELECT c.*, bu.name AS buyer_name, su.name AS seller_name
+         FROM conversations c
+         JOIN users bu ON bu.id = c.buyer_id
+         JOIN users su ON su.id = c.seller_id
+         WHERE c.id = ?`,
+        [conversationRow.id]
+      );
+
+      return {
+        status: insertedConversation.changes > 0 ? 201 : 200,
+        body: {
+          created: insertedConversation.changes > 0,
+          conversation: getConversationPublic(conversation, req.user.id)
+        }
+      };
+    });
+
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    console.error('Create conversation error:', error);
+    return res.status(500).json({ message: 'Could not create conversation.' });
+  }
+});
+
+app.get('/api/conversations', authMiddleware, async (req, res) => {
+  const cursor = parseConversationCursor(req.query);
+  if (cursor.error) return res.status(400).json({ message: cursor.error });
+
+  const params = [req.user.id, req.user.id];
+  let sql = `
+    SELECT c.*, bu.name AS buyer_name, su.name AS seller_name
+    FROM conversations c
+    JOIN users bu ON bu.id = c.buyer_id
+    JOIN users su ON su.id = c.seller_id
+    WHERE (c.buyer_id = ? OR c.seller_id = ?)
+  `;
+
+  if (cursor.beforeUpdatedAt) {
+    sql += ' AND (c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))';
+    params.push(cursor.beforeUpdatedAt, cursor.beforeUpdatedAt, cursor.beforeId);
+  }
+
+  sql += ' ORDER BY c.updated_at DESC, c.id DESC LIMIT ?';
+  params.push(cursor.limit + 1);
+
+  try {
+    const rows = await allQuery(sql, params);
+    const hasMore = rows.length > cursor.limit;
+    const page = hasMore ? rows.slice(0, cursor.limit) : rows;
+    let nextCursor = null;
+
+    if (hasMore && page.length) {
+      const oldest = page[page.length - 1];
+      nextCursor = { beforeUpdatedAt: oldest.updated_at, beforeId: oldest.id };
+    }
+
+    return res.json({
+      conversations: page.map((conversation) => getConversationPublic(conversation, req.user.id)),
+      nextCursor
+    });
+  } catch (error) {
+    console.error('List conversations error:', error);
+    return res.status(500).json({ message: 'Could not fetch conversations.' });
+  }
+});
+
+app.get('/api/conversations/:id', authMiddleware, async (req, res) => {
+  if (!isPositiveDecimal(req.params.id)) {
+    return res.status(400).json({ message: 'Invalid conversation ID.' });
+  }
+
+  try {
+    const conversation = await getQuery(
+      `SELECT c.*, bu.name AS buyer_name, su.name AS seller_name
+       FROM conversations c
+       JOIN users bu ON bu.id = c.buyer_id
+       JOIN users su ON su.id = c.seller_id
+       WHERE c.id = ?`,
+      [Number(req.params.id)]
+    );
+
+    if (!conversation ||
+        (conversation.buyer_id !== req.user.id && conversation.seller_id !== req.user.id)) {
+      return res.status(404).json({ message: 'Conversation not found.' });
+    }
+
+    return res.json({
+      conversation: getConversationPublic(conversation, req.user.id)
+    });
+  } catch (error) {
+    console.error('Get conversation error:', error);
+    return res.status(500).json({ message: 'Could not fetch conversation.' });
+  }
+});
+
+app.get('/api/conversations/:id/messages', authMiddleware, async (req, res) => {
+  if (!isPositiveDecimal(req.params.id)) {
+    return res.status(400).json({ message: 'Invalid conversation ID.' });
+  }
+
+  const cursor = parseMessageCursor(req.query);
+  if (cursor.error) return res.status(400).json({ message: cursor.error });
+
+  try {
+    const conversation = await getQuery(
+      'SELECT id, buyer_id, seller_id FROM conversations WHERE id = ?',
+      [Number(req.params.id)]
+    );
+    if (!conversation ||
+        (conversation.buyer_id !== req.user.id && conversation.seller_id !== req.user.id)) {
+      return res.status(404).json({ message: 'Conversation not found.' });
+    }
+
+    const params = [conversation.id];
+    let sql = `
+      SELECT m.id, m.conversation_id, m.sender_id, m.content, m.created_at,
+             u.name AS sender_name
+      FROM messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.conversation_id = ?
+    `;
+
+    if (cursor.beforeCreatedAt) {
+      sql += ' AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))';
+      params.push(cursor.beforeCreatedAt, cursor.beforeCreatedAt, cursor.beforeId);
+    }
+
+    sql += ' ORDER BY m.created_at DESC, m.id DESC LIMIT ?';
+    params.push(cursor.limit + 1);
+
+    const rows = await allQuery(sql, params);
+    const hasMore = rows.length > cursor.limit;
+    const pageNewestFirst = hasMore ? rows.slice(0, cursor.limit) : rows;
+    const page = [...pageNewestFirst].reverse();
+    let nextCursor = null;
+
+    if (hasMore && pageNewestFirst.length) {
+      const oldest = pageNewestFirst[pageNewestFirst.length - 1];
+      nextCursor = { beforeCreatedAt: oldest.created_at, beforeId: oldest.id };
+    }
+
+    return res.json({
+      messages: page.map((message) => ({
+        id: message.id,
+        sender: { id: message.sender_id, name: message.sender_name },
+        content: message.content,
+        created_at: message.created_at
+      })),
+      nextCursor
+    });
+  } catch (error) {
+    console.error('Get conversation messages error:', error);
+    return res.status(500).json({ message: 'Could not fetch messages.' });
+  }
+});
+
+app.post('/api/conversations/:id/messages', authMiddleware, async (req, res) => {
+  if (!isPositiveDecimal(req.params.id)) {
+    return res.status(400).json({ message: 'Invalid conversation ID.' });
+  }
+
+  const rawContent = req.body && typeof req.body === 'object' ? req.body.content : undefined;
+  if (typeof rawContent !== 'string') {
+    return res.status(400).json({ message: 'Message content is required.' });
+  }
+  const content = rawContent.trim();
+  if (!content) {
+    return res.status(400).json({ message: 'Message content cannot be blank.' });
+  }
+  if (Array.from(content).length > 2000) {
+    return res.status(400).json({ message: 'Message content must be 2000 characters or fewer.' });
+  }
+
+  try {
+    const result = await withTransaction(async () => {
+      const conversation = await getQuery(
+        'SELECT id, listing_id, buyer_id, seller_id, read_only FROM conversations WHERE id = ?',
+        [Number(req.params.id)]
+      );
+      if (!conversation ||
+          (conversation.buyer_id !== req.user.id && conversation.seller_id !== req.user.id)) {
+        return { status: 404, body: { message: 'Conversation not found.' } };
+      }
+      if (conversation.read_only === 1) {
+        return { status: 409, body: { message: 'This conversation is read-only.' } };
+      }
+
+      if (conversation.buyer_id === req.user.id) {
+        // Original Buyer identity remains valid after a Buyer upgrades to Seller.
+      } else {
+        if (req.user.role !== 'seller' || conversation.seller_id !== req.user.id) {
+          return { status: 404, body: { message: 'Conversation not found.' } };
+        }
+        if (conversation.listing_id !== null) {
+          const listing = await getQuery(
+            'SELECT id, user_id, status FROM listings WHERE id = ?',
+            [conversation.listing_id]
+          );
+          if (!listing || listing.user_id !== req.user.id) {
+            return { status: 404, body: { message: 'Conversation not found.' } };
+          }
+        }
+      }
+
+      const now = new Date();
+      const minuteCutoff = new Date(now.getTime() - 60 * 1000).toISOString();
+      const hourCutoff = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+
+      const minuteCount = await getQuery(
+        'SELECT COUNT(*) AS total FROM messages WHERE sender_id = ? AND created_at > ?',
+        [req.user.id, minuteCutoff]
+      );
+      const hourCount = await getQuery(
+        'SELECT COUNT(*) AS total FROM messages WHERE sender_id = ? AND created_at > ?',
+        [req.user.id, hourCutoff]
+      );
+
+      if (minuteCount.total >= 5 || hourCount.total >= 30) {
+        let retryAt = now.getTime();
+
+        if (minuteCount.total >= 5) {
+          const oldestMinute = await getQuery(
+            `SELECT created_at FROM messages
+             WHERE sender_id = ? AND created_at > ?
+             ORDER BY created_at ASC, id ASC LIMIT 1`,
+            [req.user.id, minuteCutoff]
+          );
+          if (oldestMinute) {
+            retryAt = Math.max(retryAt, new Date(oldestMinute.created_at).getTime() + 60 * 1000);
+          }
+        }
+
+        if (hourCount.total >= 30) {
+          const oldestHour = await getQuery(
+            `SELECT created_at FROM messages
+             WHERE sender_id = ? AND created_at > ?
+             ORDER BY created_at ASC, id ASC LIMIT 1`,
+            [req.user.id, hourCutoff]
+          );
+          if (oldestHour) {
+            retryAt = Math.max(retryAt, new Date(oldestHour.created_at).getTime() + 60 * 60 * 1000);
+          }
+        }
+
+        const retryAfterSeconds = Math.max(1, Math.ceil((retryAt - now.getTime()) / 1000));
+        return {
+          status: 429,
+          headers: { 'Retry-After': String(retryAfterSeconds) },
+          body: { message: 'Message rate limit exceeded.', retryAfterSeconds }
+        };
+      }
+
+      const timestamp = now.toISOString();
+      const inserted = await runQuery(
+        'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+        [conversation.id, req.user.id, content, timestamp]
+      );
+      await runQuery(
+        'UPDATE conversations SET updated_at = ? WHERE id = ?',
+        [timestamp, conversation.id]
+      );
+
+      const sender = await getQuery('SELECT id, name FROM users WHERE id = ?', [req.user.id]);
+      return {
+        status: 201,
+        body: {
+          message: {
+            id: inserted.id,
+            sender: { id: sender.id, name: sender.name },
+            content,
+            created_at: timestamp
+          }
+        }
+      };
+    });
+
+    if (result.headers) res.set(result.headers);
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    console.error('Send conversation message error:', error);
+    return res.status(500).json({ message: 'Could not send message.' });
+  }
+});
+
 app.post('/api/listings', authMiddleware, sellerMiddleware, async (req, res) => {
   const validation = validateListingInput(req.body);
   if (validation.errors.length) {
@@ -900,19 +1395,37 @@ app.delete('/api/listings/:id', authMiddleware, sellerMiddleware, async (req, re
   const { id } = req.params;
 
   try {
-    const existingListing = await getQuery('SELECT * FROM listings WHERE id = ?', [id]);
-    if (!existingListing) {
-      return res.status(404).json({ message: 'Listing not found.' });
-    }
+    await withTransaction(async () => {
+      const existingListing = await getQuery('SELECT * FROM listings WHERE id = ?', [id]);
+      if (!existingListing) {
+        const error = new Error('Listing not found.');
+        error.status = 404;
+        throw error;
+      }
 
-    if (existingListing.user_id !== req.user.id) {
-      return res.status(403).json({ message: 'You can only delete your own listings.' });
-    }
+      if (existingListing.user_id !== req.user.id) {
+        const error = new Error('You can only delete your own listings.');
+        error.status = 403;
+        throw error;
+      }
 
-    await runQuery('DELETE FROM listings WHERE id = ?', [id]);
+      await runQuery(
+        `UPDATE conversations
+         SET listing_id = NULL, listing_title_snapshot = ?, read_only = 1
+         WHERE listing_id = ?`,
+        [existingListing.title, existingListing.id]
+      );
+      await runQuery('DELETE FROM listings WHERE id = ?', [existingListing.id]);
+    });
     return res.json({ message: 'Listing deleted successfully.' });
   } catch (error) {
     console.error('Delete listing error:', error);
+    if (error.status === 404) {
+      return res.status(404).json({ message: 'Listing not found.' });
+    }
+    if (error.status === 403) {
+      return res.status(403).json({ message: 'You can only delete your own listings.' });
+    }
     return res.status(500).json({ message: 'Could not delete listing.' });
   }
 });

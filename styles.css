@@ -528,6 +528,181 @@ body.dark-theme .sold-badge { background: #4c1d25; color: #fecaca; }
 .seller-profile-state { min-height: 320px; border-style: solid; box-shadow: var(--shadow); }
 .seller-profile-state.not-found { border-style: dashed; }
 .seller-profile-state.error { border-color: rgba(185, 28, 28, 0.35); }
+
+.product-enquiry-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 18px;
+}
+.product-enquiry-action button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.messages-page { min-height: 620px; }
+.messages-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.36fr) minmax(0, 1fr);
+  min-height: 560px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card-bg);
+  box-shadow: var(--shadow);
+}
+.conversation-sidebar {
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  padding: 16px;
+}
+.conversation-sidebar .panel-header h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+.conversation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+.conversation-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--card-bg);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.conversation-list-item.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(45, 109, 246, 0.10);
+}
+.conversation-list-item small,
+.conversation-participant { color: var(--muted); }
+.conversation-read-only { color: var(--danger); font-weight: 700; }
+.conversation-list-loading,
+.conversation-list-empty,
+.conversation-list-error {
+  padding: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.conversation-list-empty strong,
+.conversation-list-error strong { display: block; color: var(--text); }
+.conversation-load-more,
+.message-load-older {
+  width: 100%;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.message-thread {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+}
+.message-thread-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+.message-thread-header h1 { margin: 0 0 6px; font-size: 1.35rem; }
+.message-read-only {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-weight: 800;
+}
+.message-history {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 310px;
+  max-height: 430px;
+  overflow-y: auto;
+  padding: 16px 4px;
+}
+.message-bubble {
+  max-width: 78%;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 10px 12px;
+  align-self: flex-start;
+}
+.message-bubble.message-own {
+  background: var(--accent-soft);
+  border-color: rgba(45, 109, 246, 0.28);
+  align-self: flex-end;
+}
+.message-sender { display: block; margin-bottom: 4px; }
+.message-content {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.message-time { display: block; margin-top: 5px; color: var(--muted); }
+.message-composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.message-composer textarea {
+  min-height: 74px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+.message-composer button {
+  align-self: start;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  padding: 11px 16px;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+.message-composer button:disabled,
+.message-composer textarea:disabled { opacity: 0.65; cursor: not-allowed; }
+.message-composer .form-status {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.conversation-thread-state,
+.message-loading {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+}
+.conversation-thread-state h1 { color: var(--text); }
 .site-footer { padding: 18px 0 42px; color: var(--muted); }
 .footer-inner { text-align: center; }
 
@@ -694,6 +869,12 @@ body.dark-theme .sold-badge { background: #4c1d25; color: #fecaca; }
   .main-nav { justify-content: center; }
   .product-detail-layout { grid-template-columns: 1fr; }
   .product-detail-media { min-height: 260px; }
+  .messages-layout { grid-template-columns: 1fr; }
+  .conversation-sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+  .conversation-list { max-height: 220px; }
+  .message-history { max-height: 360px; }
+  .message-composer { grid-template-columns: 1fr; }
+  .message-composer button { width: 100%; }
   .seller-profile-header { align-items: flex-start; flex-direction: column; }
   .seller-profile-count { margin: 0; }
 }

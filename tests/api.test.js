@@ -69,7 +69,7 @@ async function assertJwtSecretRequired(secretValue, label) {
   });
 }
 
-function startServer() {
+function startServer(extraEnvironment = {}) {
   return new Promise((resolve, reject) => {
     serverProcess = spawn(process.execPath, ['server.js'], {
       cwd: path.join(__dirname, '..'),
@@ -77,7 +77,8 @@ function startServer() {
         ...process.env,
         PORT: String(port),
         JWT_SECRET: TEST_JWT_SECRET,
-        STUDENT_MARKET_DB_PATH: dbPath
+        STUDENT_MARKET_DB_PATH: dbPath,
+        ...extraEnvironment
       },
       stdio: 'ignore'
     });
@@ -104,6 +105,27 @@ function startServer() {
     };
     poll();
   });
+}
+
+function fixedDateNodeOptions(fixedTime) {
+  const preloadPath = path.join(testDir, 'fixed-date.cjs');
+  fs.writeFileSync(preloadPath, `
+    const NativeDate = globalThis.Date;
+    const fixedTime = ${fixedTime};
+    const FixedDate = new Proxy(NativeDate, {
+      apply() {
+        return new NativeDate(fixedTime).toString();
+      },
+      construct(target, args, newTarget) {
+        return Reflect.construct(target, args.length ? args : [fixedTime], newTarget);
+      }
+    });
+    FixedDate.now = () => fixedTime;
+    globalThis.Date = FixedDate;
+  `, 'utf8');
+
+  const inheritedOptions = process.env.NODE_OPTIONS || '';
+  return `${inheritedOptions} --require="${preloadPath}"`.trim();
 }
 
 function stopServer() {
@@ -233,7 +255,7 @@ function request(requestPath, options = {}) {
         try { parsed = data ? JSON.parse(data) : {}; } catch (error) {
           return reject(new Error(`Invalid JSON response: ${data}`));
         }
-        resolve({ status: res.statusCode, body: parsed });
+        resolve({ status: res.statusCode, headers: res.headers, body: parsed });
       });
     });
 
@@ -746,6 +768,531 @@ async function run() {
     publicDetail.body.listing.seller_id > 0,
     'Public detail listing omitted a valid seller_id');
 
+  const unauthConversation = await request(`/api/listings/${otherCreate.body.listing.id}/conversations`, {
+    method: 'POST'
+  });
+  assert(unauthConversation.status === 401, 'Unauthenticated conversation creation was not rejected');
+
+  const sellerConversationCreate = await request(`/api/listings/${otherCreate.body.listing.id}/conversations`, {
+    method: 'POST',
+    headers: authHeader(seller.body.token)
+  });
+  assert(sellerConversationCreate.status === 403, 'Seller could create an enquiry as a Buyer');
+
+  const buyerOwnedListing = await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [buyer.body.user.id, 'Buyer-Owned Inquiry Fixture', 'Own listing fixture', 'Other', 15, 'Good', 'pickup', 'Campus']
+  );
+  const ownConversation = await request(`/api/listings/${buyerOwnedListing.lastID}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(ownConversation.status === 409, 'Buyer could enquire about an own listing');
+
+  const soldConversationListing = await dbGet(
+    'SELECT id FROM listings WHERE status = ? LIMIT 1',
+    ['sold']
+  );
+  const soldConversation = await request(`/api/listings/${soldConversationListing.id}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(soldConversation.status === 409, 'Buyer could enquire about a sold listing');
+
+  const firstConversationResponse = await request(`/api/listings/${otherCreate.body.listing.id}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(firstConversationResponse.status === 201, 'Buyer conversation creation failed');
+  assert(firstConversationResponse.body.created === true, 'New conversation did not report created=true');
+  assert(firstConversationResponse.body.conversation.listing_id === otherCreate.body.listing.id,
+    'Conversation was linked to the wrong listing');
+
+  const duplicateConversationResponse = await request(`/api/listings/${otherCreate.body.listing.id}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(duplicateConversationResponse.status === 200, 'Duplicate conversation did not return HTTP 200');
+  assert(duplicateConversationResponse.body.created === false, 'Duplicate conversation created a duplicate');
+  assert(duplicateConversationResponse.body.conversation.id === firstConversationResponse.body.conversation.id,
+    'Duplicate conversation returned a different conversation');
+  const duplicateMessageCount = await dbGet(
+    'SELECT COUNT(*) AS total FROM messages WHERE conversation_id = ?',
+    [firstConversationResponse.body.conversation.id]
+  );
+  assert(duplicateMessageCount.total === 0,
+    'Duplicate conversation creation created or appended a message');
+
+  const concurrentConversationResponses = await Promise.all(
+    [buyer.body.token, buyer.body.token].map(() =>
+      request(`/api/listings/${ownCreate.body.listing.id}/conversations`, {
+        method: 'POST',
+        headers: authHeader(buyer.body.token)
+      })
+    )
+  );
+  assert(concurrentConversationResponses.every((response) => response.status === 201 || response.status === 200),
+    'Concurrent duplicate conversation creation failed');
+  assert(concurrentConversationResponses.every((response) =>
+    response.body.conversation.id === concurrentConversationResponses[0].body.conversation.id
+  ), 'Concurrent conversation creation produced different conversations');
+
+  const concurrentConversationId = concurrentConversationResponses[0].body.conversation.id;
+  const concurrentConversationCount = await dbGet(
+    'SELECT COUNT(*) AS total FROM conversations WHERE listing_id = ? AND buyer_id = ?',
+    [ownCreate.body.listing.id, buyer.body.user.id]
+  );
+  assert(concurrentConversationCount.total === 1, 'Concurrent conversation creation left duplicates');
+  const concurrentMessageCount = await dbGet(
+    'SELECT COUNT(*) AS total FROM messages WHERE conversation_id = ?',
+    [concurrentConversationId]
+  );
+  assert(concurrentMessageCount.total === 0,
+    'Concurrent conversation creation created a message');
+
+  const conversationId = firstConversationResponse.body.conversation.id;
+  const conversationDetail = await request(`/api/conversations/${conversationId}`, {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(conversationDetail.status === 200, 'Buyer could not read own conversation');
+  assert(conversationDetail.body.conversation.other_participant.id === secondSeller.body.user.id,
+    'Conversation returned the wrong participant');
+
+  const sellerConversationDetail = await request(`/api/conversations/${conversationId}`, {
+    headers: authHeader(secondSeller.body.token)
+  });
+  assert(sellerConversationDetail.status === 200, 'Listing Seller could not read own conversation');
+
+  const nonParticipantConversation = await request(`/api/conversations/${conversationId}`, {
+    headers: authHeader(bodySecurityBuyer.body.token)
+  });
+  assert(nonParticipantConversation.status === 404, 'Nonparticipant could read a conversation');
+
+  const nonParticipantMessages = await request(`/api/conversations/${conversationId}/messages`, {
+    headers: authHeader(bodySecurityBuyer.body.token)
+  });
+  assert(nonParticipantMessages.status === 404, 'Nonparticipant could read conversation messages');
+
+  const blankMessage = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: '   ', senderId: secondSeller.body.user.id, sellerId: secondSeller.body.user.id }
+  });
+  assert(blankMessage.status === 400, 'Whitespace-only message was accepted');
+
+  const oversizedMessage = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'x'.repeat(2001) }
+  });
+  assert(oversizedMessage.status === 400, 'Over-limit message was accepted');
+
+  const boundaryMessage = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: {
+      content: 'x'.repeat(2000),
+      senderId: secondSeller.body.user.id,
+      recipientId: secondSeller.body.user.id,
+      listingId: ownCreate.body.listing.id
+    }
+  });
+  assert(boundaryMessage.status === 201, 'Exactly 2000-character message was rejected');
+  assert(boundaryMessage.body.message.sender.id === buyer.body.user.id,
+    'Message sender identity was taken from the request body');
+  assert(JSON.stringify(Object.keys(boundaryMessage.body.message).sort()) ===
+    JSON.stringify(['content', 'created_at', 'id', 'sender']),
+    'Send-message response returned fields outside the public message DTO');
+
+  const sellerReply = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(secondSeller.body.token),
+    body: { content: 'Seller reply', senderId: buyer.body.user.id, buyerId: buyer.body.user.id }
+  });
+  assert(sellerReply.status === 201, 'Listing Seller could not reply');
+  assert(sellerReply.body.message.sender.id === secondSeller.body.user.id,
+    'Seller reply sender identity was incorrect');
+
+  const nonOwnerSellerReply = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(seller.body.token),
+    body: { content: 'Unauthorized reply' }
+  });
+  assert(nonOwnerSellerReply.status === 404, 'Non-owner Seller could reply to a conversation');
+
+  const unrelatedBuyerSend = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(bodySecurityBuyer.body.token),
+    body: { content: 'Unrelated Buyer attempt' }
+  });
+  assert(unrelatedBuyerSend.status === 404, 'Unrelated Buyer could send to another conversation');
+
+  const initialMessagePage = await request(
+    `/api/conversations/${conversationId}/messages?limit=30`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(initialMessagePage.status === 200, 'Message history request failed');
+  assert(initialMessagePage.body.messages.length === 2, 'Message history did not return the inserted messages');
+  assert(initialMessagePage.body.messages[0].sender.id === buyer.body.user.id,
+    'Message history was not oldest-first');
+  assert(initialMessagePage.body.messages.every((item) =>
+    JSON.stringify(Object.keys(item).sort()) ===
+    JSON.stringify(['content', 'created_at', 'id', 'sender'])
+  ), 'Message-history response returned fields outside the public message DTO');
+
+  const firstHistoryPage = await request(
+    `/api/conversations/${conversationId}/messages?limit=1`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(firstHistoryPage.status === 200, 'First paginated message page failed');
+  assert(firstHistoryPage.body.messages.length === 1, 'Message history limit was not applied');
+  assert(firstHistoryPage.body.nextCursor, 'Message history did not provide a compound cursor');
+
+  const olderHistoryPage = await request(
+    `/api/conversations/${conversationId}/messages?limit=1&beforeCreatedAt=${encodeURIComponent(firstHistoryPage.body.nextCursor.beforeCreatedAt)}&beforeId=${firstHistoryPage.body.nextCursor.beforeId}`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(olderHistoryPage.status === 200, 'Older message page failed');
+
+  await dbRun('DELETE FROM messages WHERE conversation_id = ?', [conversationId]);
+  const tiedTimestamp = '2026-06-01T12:00:00.000Z';
+  const tiedMessageIds = [];
+  for (let index = 1; index <= 4; index += 1) {
+    const created = await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Tied message ${index}`, tiedTimestamp]
+    );
+    tiedMessageIds.push(created.lastID);
+  }
+
+  const tiedPageOne = await request(
+    `/api/conversations/${conversationId}/messages?limit=2`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(tiedPageOne.status === 200, 'Tied-timestamp first message page failed');
+  assert(tiedPageOne.body.nextCursor, 'Tied-timestamp first message page lacked a cursor');
+
+  const tiedPageTwo = await request(
+    `/api/conversations/${conversationId}/messages?limit=2&beforeCreatedAt=${encodeURIComponent(tiedPageOne.body.nextCursor.beforeCreatedAt)}&beforeId=${tiedPageOne.body.nextCursor.beforeId}`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(tiedPageTwo.status === 200, 'Tied-timestamp second message page failed');
+
+  const expectedLatestMessagePage = tiedMessageIds.slice(2);
+  const expectedOlderMessagePage = tiedMessageIds.slice(0, 2);
+  assert(JSON.stringify(tiedPageOne.body.messages.map((item) => item.id)) ===
+    JSON.stringify(expectedLatestMessagePage),
+    'Tied-timestamp latest message page had incorrect ID ordering');
+  assert(JSON.stringify(tiedPageTwo.body.messages.map((item) => item.id)) ===
+    JSON.stringify(expectedOlderMessagePage),
+    'Tied-timestamp older message page had incorrect ID ordering');
+  assert(JSON.stringify([
+    ...tiedPageTwo.body.messages.map((item) => item.id),
+    ...tiedPageOne.body.messages.map((item) => item.id)
+  ]) === JSON.stringify(tiedMessageIds),
+  'Tied-timestamp messages were not in exact oldest-first order across pages');
+  assert(tiedPageTwo.body.nextCursor === null,
+    'Tied-timestamp message pagination returned an unexpected extra page');
+
+  for (const incompleteCursor of [
+    '?limit=abc',
+    '?limit=101',
+    '?beforeCreatedAt=2026-01-01T00:00:00.000Z',
+    '?beforeId=1',
+    '?beforeCreatedAt=bad&beforeId=1',
+    '?beforeCreatedAt=2026-01-01T00:00:00.000Z&beforeId=abc'
+  ]) {
+    const invalidCursor = await request(
+      `/api/conversations/${conversationId}/messages${incompleteCursor}`,
+      { headers: authHeader(buyer.body.token) }
+    );
+    assert(invalidCursor.status === 400, `Message cursor '${incompleteCursor}' was accepted`);
+  }
+
+  const conversationList = await request('/api/conversations?limit=20', {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(conversationList.status === 200, 'Buyer conversation list failed');
+  assert(conversationList.body.conversations.every((item) =>
+    item.other_participant && item.other_participant.id && item.other_participant.name
+  ), 'Conversation list omitted participant metadata');
+
+  const tiedUpdatedAt = '2099-06-01T12:00:00.000Z';
+  const tiedConversationIds = [];
+  for (let index = 1; index <= 4; index += 1) {
+    const created = await dbRun(
+      `INSERT INTO conversations
+       (listing_id, listing_title_snapshot, buyer_id, seller_id, read_only, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      [null, `Tied Conversation ${index}`, buyer.body.user.id, secondSeller.body.user.id, tiedUpdatedAt, tiedUpdatedAt]
+    );
+    tiedConversationIds.push(created.lastID);
+  }
+
+  const tiedConversationPageOne = await request(
+    '/api/conversations?limit=2&beforeUpdatedAt=',
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(tiedConversationPageOne.status === 400,
+    'Empty conversation-list cursor timestamp was accepted');
+
+  for (const invalidConversationCursor of [
+    '?beforeUpdatedAt=2026-06-01T12:00:00.000Z',
+    '?beforeId=1',
+    '?beforeUpdatedAt=bad&beforeId=1',
+    '?beforeUpdatedAt=2026-06-01T12:00:00.000Z&beforeId=abc',
+    '?limit=0'
+  ]) {
+    const invalidConversationCursorResponse = await request(
+      `/api/conversations${invalidConversationCursor}`,
+      { headers: authHeader(buyer.body.token) }
+    );
+    assert(invalidConversationCursorResponse.status === 400,
+      `Conversation cursor '${invalidConversationCursor}' was accepted`);
+  }
+
+  const tiedConversationPageOneValid = await request(
+    '/api/conversations?limit=2',
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(tiedConversationPageOneValid.status === 200, 'Tied conversation first page failed');
+  assert(tiedConversationPageOneValid.body.nextCursor,
+    'Tied conversation first page lacked a compound cursor');
+  const tiedConversationPageTwo = await request(
+    `/api/conversations?limit=2&beforeUpdatedAt=${encodeURIComponent(tiedConversationPageOneValid.body.nextCursor.beforeUpdatedAt)}&beforeId=${tiedConversationPageOneValid.body.nextCursor.beforeId}`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(tiedConversationPageTwo.status === 200, 'Tied conversation second page failed');
+  const expectedLatestConversationPage = [...tiedConversationIds].reverse().slice(0, 2);
+  const expectedOlderConversationPage = [...tiedConversationIds].reverse().slice(2);
+  assert(JSON.stringify(tiedConversationPageOneValid.body.conversations.map((item) => item.id)) ===
+    JSON.stringify(expectedLatestConversationPage),
+    'Tied-timestamp latest conversation page had incorrect ID ordering');
+  assert(JSON.stringify(tiedConversationPageTwo.body.conversations.map((item) => item.id)) ===
+    JSON.stringify(expectedOlderConversationPage),
+    'Tied-timestamp older conversation page had incorrect ID ordering');
+  assert(JSON.stringify([
+    ...tiedConversationPageOneValid.body.conversations.map((item) => item.id),
+    ...tiedConversationPageTwo.body.conversations.map((item) => item.id)
+  ]) === JSON.stringify([...tiedConversationIds].reverse()),
+  'Tied-timestamp conversations were not in exact newest-first order across pages');
+
+  const invalidConversationLimit = await request('/api/conversations?limit=101', {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(invalidConversationLimit.status === 400, 'Conversation list accepted limit above 100');
+
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+  let rateConversationId = conversationId;
+  for (let index = 0; index < 3; index += 1) {
+    const sent = await request(`/api/conversations/${rateConversationId}/messages`, {
+      method: 'POST',
+      headers: authHeader(buyer.body.token),
+      body: { content: `Minute message ${index}` }
+    });
+    assert(sent.status === 201, `Message ${index + 1} in minute-rate fixture was rejected`);
+  }
+
+  const crossConversation = await request(`/api/listings/${ownCreate.body.listing.id}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(crossConversation.status === 200 || crossConversation.status === 201,
+    'Cross-conversation rate fixture failed');
+  rateConversationId = crossConversation.body.conversation.id;
+  for (let index = 0; index < 2; index += 1) {
+    const sent = await request(`/api/conversations/${rateConversationId}/messages`, {
+      method: 'POST',
+      headers: authHeader(buyer.body.token),
+      body: { content: `Cross-conversation minute message ${index}` }
+    });
+    assert(sent.status === 201, `Cross-conversation message ${index + 1} was rejected`);
+  }
+
+  const rateLimited = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must be rate limited' }
+  });
+  assert(rateLimited.status === 429, 'Per-user minute rate limit was not enforced');
+  assert(rateLimited.body.retryAfterSeconds >= 1, 'Rate-limit response omitted retryAfterSeconds');
+  assert(Number(rateLimited.headers['retry-after']) >= 1, 'Rate-limit response omitted Retry-After');
+
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+  const hourFixtureTimestamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  for (let index = 0; index < 30; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Hour fixture ${index}`, hourFixtureTimestamp]
+    );
+  }
+  const hourLimited = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must be hour rate limited' }
+  });
+  assert(hourLimited.status === 429, 'Per-user hourly rate limit was not enforced');
+  assert(hourLimited.body.retryAfterSeconds >= 1, 'Hourly rate-limit response omitted retryAfterSeconds');
+  assert(Number(hourLimited.headers['retry-after']) >= 1, 'Hourly rate-limit response omitted Retry-After');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  await stopServer();
+  const boundaryNow = Date.now();
+  await startServer({ NODE_OPTIONS: fixedDateNodeOptions(boundaryNow) });
+
+  await dbRun(
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+    [conversationId, buyer.body.user.id, 'Exactly 60 seconds old', new Date(boundaryNow - 60 * 1000).toISOString()]
+  );
+  for (let index = 0; index < 4; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Minute boundary fixture ${index}`, new Date(boundaryNow - 59999).toISOString()]
+    );
+  }
+  const exactMinuteBoundary = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must exclude exactly 60 seconds old' }
+  });
+  assert(exactMinuteBoundary.status === 201,
+    'Message exactly 60 seconds old was counted in the minute window');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  for (let index = 0; index < 5; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Just-inside minute fixture ${index}`, new Date(boundaryNow - 59999).toISOString()]
+    );
+  }
+  const justInsideMinuteBoundary = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must count messages just inside the minute window' }
+  });
+  assert(justInsideMinuteBoundary.status === 429,
+    'Messages just inside the minute window were not counted');
+  assert(justInsideMinuteBoundary.body.retryAfterSeconds >= 1 &&
+    Number(justInsideMinuteBoundary.headers['retry-after']) >= 1,
+  'Minute boundary rate limit omitted valid retry information');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  await dbRun(
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+    [conversationId, buyer.body.user.id, 'Exactly 3600 seconds old', new Date(boundaryNow - 3600 * 1000).toISOString()]
+  );
+  for (let index = 0; index < 29; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Hour boundary fixture ${index}`, new Date(boundaryNow - 30 * 60 * 1000).toISOString()]
+    );
+  }
+  const exactHourBoundary = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must exclude exactly 3600 seconds old' }
+  });
+  assert(exactHourBoundary.status === 201,
+    'Message exactly 3600 seconds old was counted in the hour window');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  for (let index = 0; index < 30; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Just-inside hour fixture ${index}`, new Date(boundaryNow - 3600 * 1000 + 1).toISOString()]
+    );
+  }
+  const justInsideHourBoundary = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Must count messages just inside the hour window' }
+  });
+  assert(justInsideHourBoundary.status === 429,
+    'Messages just inside the hour window were not counted');
+  assert(justInsideHourBoundary.body.retryAfterSeconds >= 1 &&
+    Number(justInsideHourBoundary.headers['retry-after']) >= 1,
+  'Hour boundary rate limit omitted valid retry information');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  for (let index = 0; index < 4; index += 1) {
+    await dbRun(
+      'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+      [conversationId, buyer.body.user.id, `Concurrent minute fixture ${index}`, new Date(boundaryNow - 1000).toISOString()]
+    );
+  }
+  const concurrentRateResponses = await Promise.all(
+    [conversationId, rateConversationId, conversationId].map((targetConversationId, index) =>
+      request(`/api/conversations/${targetConversationId}/messages`, {
+        method: 'POST',
+        headers: authHeader(buyer.body.token),
+        body: { content: `Concurrent rate-limit request ${index}` }
+      })
+    )
+  );
+  assert(concurrentRateResponses.filter((response) => response.status === 201).length === 1,
+    'Concurrent sends did not permit exactly one request at the minute threshold');
+  assert(concurrentRateResponses.filter((response) => response.status === 429).length === 2,
+    'Concurrent sends bypassed the per-user minute limit');
+  assert(concurrentRateResponses.filter((response) => response.status === 429).every((response) =>
+    response.body.retryAfterSeconds >= 1 && Number(response.headers['retry-after']) >= 1
+  ), 'Concurrent rate-limit responses omitted valid retry information');
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  await stopServer();
+  await startServer();
+
+  await dbRun(`
+    CREATE TRIGGER reject_transaction_message
+    BEFORE INSERT ON messages
+    WHEN NEW.content = 'Rollback Message Test'
+    BEGIN
+      SELECT RAISE(FAIL, 'forced message transaction test failure');
+    END
+  `);
+  const rollbackMessage = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token),
+    body: { content: 'Rollback Message Test' }
+  });
+  assert(rollbackMessage.status === 500, 'Forced message transaction failure did not produce an API error');
+  await dbRun('DROP TRIGGER reject_transaction_message');
+  const rollbackMessageCount = await dbGet(
+    'SELECT COUNT(*) AS total FROM messages WHERE conversation_id = ? AND content = ?',
+    [conversationId, 'Rollback Message Test']
+  );
+  assert(rollbackMessageCount.total === 0, 'Failed message transaction left a partial insert');
+
+  const soldLaterListing = await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Existing Sold Conversation', 'Becomes sold', 'Other', 25, 'Good', 'pickup', 'Campus', 'active']
+  );
+  const soldLaterConversation = await request(`/api/listings/${soldLaterListing.lastID}/conversations`, {
+    method: 'POST',
+    headers: authHeader(buyer.body.token)
+  });
+  assert(soldLaterConversation.status === 201, 'Could not create pre-sale conversation');
+  await dbRun('UPDATE listings SET status = ? WHERE id = ?', ['sold', soldLaterListing.lastID]);
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+
+  const buyerSoldFollowUp = await request(
+    `/api/conversations/${soldLaterConversation.body.conversation.id}/messages`,
+    {
+      method: 'POST',
+      headers: authHeader(buyer.body.token),
+      body: { content: 'Buyer follow-up in existing sold conversation' }
+    }
+  );
+  assert(buyerSoldFollowUp.status === 201, 'Existing sold-listing conversation blocked Buyer follow-up');
+  const sellerSoldFollowUp = await request(
+    `/api/conversations/${soldLaterConversation.body.conversation.id}/messages`,
+    {
+      method: 'POST',
+      headers: authHeader(secondSeller.body.token),
+      body: { content: 'Seller follow-up in existing sold conversation' }
+    }
+  );
+  assert(sellerSoldFollowUp.status === 201, 'Existing sold-listing conversation blocked Seller reply');
+
   const buyerBeforeUpgrade = await dbGet('SELECT id, email, password_hash, student_verified, role FROM users WHERE email = ?', ['buyer@example.com']);
   assert(buyerBeforeUpgrade, 'Buyer account was not found');
 
@@ -788,6 +1335,15 @@ async function run() {
   });
   assert(repeated.status === 200, 'Repeated upgrade was not idempotent');
   assert(repeated.body.user.role === 'seller', 'Repeated upgrade changed account role');
+
+  await dbRun('DELETE FROM messages WHERE sender_id = ?', [buyer.body.user.id]);
+  const upgradedBuyerFollowUp = await request(`/api/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: authHeader(upgrade.body.token),
+    body: { content: 'Buyer follow-up after upgrade' }
+  });
+  assert(upgradedBuyerFollowUp.status === 201,
+    'Buyer participant lost conversation access after upgrading to Seller');
 
   const missingToken = await request('/api/users/me/upgrade-to-seller', { method: 'POST' });
   assert(missingToken.status === 401, 'Missing upgrade token was not rejected');
@@ -832,11 +1388,200 @@ async function run() {
   const targetSeller = await dbGet('SELECT id, role FROM users WHERE id = ?', [seller.body.user.id]);
   assert(targetSeller.role === 'seller', 'Target Seller role unexpectedly changed');
 
+  const historyListing = await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Deletion History Fixture', 'Conversation history fixture', 'Other', 45, 'Good', 'pickup', 'Campus']
+  );
+  const historyConversation = await dbRun(
+    `INSERT INTO conversations
+     (listing_id, listing_title_snapshot, buyer_id, seller_id, read_only, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 0, ?, ?)`,
+    [
+      historyListing.lastID,
+      'Deletion History Fixture',
+      buyer.body.user.id,
+      secondSeller.body.user.id,
+      '2026-01-10T12:00:00.000Z',
+      '2026-01-10T12:05:00.000Z'
+    ]
+  );
+  await dbRun(
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+    [historyConversation.lastID, buyer.body.user.id, 'Buyer historical message', '2026-01-10T12:01:00.000Z']
+  );
+  await dbRun(
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+    [historyConversation.lastID, secondSeller.body.user.id, 'Seller historical message', '2026-01-10T12:02:00.000Z']
+  );
+
+  const historyDelete = await request(`/api/listings/${historyListing.lastID}`, {
+    method: 'DELETE',
+    headers: authHeader(secondSeller.body.token)
+  });
+  assert(historyDelete.status === 200, 'Deletion of listing with conversation history failed');
+
+  const historyBuyerDetail = await request(`/api/conversations/${historyConversation.lastID}`, {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(historyBuyerDetail.status === 200, 'Buyer could not read retained deleted-listing history');
+  assert(historyBuyerDetail.body.conversation.listing_id === null,
+    'Retained conversation did not clear listing_id');
+  assert(historyBuyerDetail.body.conversation.read_only === true,
+    'Retained conversation was not read-only');
+
+  const historySellerDetail = await request(`/api/conversations/${historyConversation.lastID}`, {
+    headers: authHeader(secondSeller.body.token)
+  });
+  assert(historySellerDetail.status === 200, 'Seller could not read retained deleted-listing history');
+
+  const historyBuyerMessages = await request(
+    `/api/conversations/${historyConversation.lastID}/messages`,
+    { headers: authHeader(buyer.body.token) }
+  );
+  assert(historyBuyerMessages.status === 200, 'Buyer could not retrieve retained message history');
+  assert(historyBuyerMessages.body.messages.length === 2,
+    'Deleted listing did not preserve existing message history');
+
+  const historySellerMessages = await request(
+    `/api/conversations/${historyConversation.lastID}/messages`,
+    { headers: authHeader(secondSeller.body.token) }
+  );
+  assert(historySellerMessages.status === 200, 'Seller could not retrieve retained message history');
+  assert(historySellerMessages.body.messages.length === 2,
+    'Seller deleted-listing history response lost messages');
+
+  const historyBuyerSend = await request(
+    `/api/conversations/${historyConversation.lastID}/messages`,
+    {
+      method: 'POST',
+      headers: authHeader(buyer.body.token),
+      body: { content: 'Buyer send after deleted listing' }
+    }
+  );
+  assert(historyBuyerSend.status === 409, 'Buyer could send after listing deletion');
+
+  const historySellerSend = await request(
+    `/api/conversations/${historyConversation.lastID}/messages`,
+    {
+      method: 'POST',
+      headers: authHeader(secondSeller.body.token),
+      body: { content: 'Seller send after deleted listing' }
+    }
+  );
+  assert(historySellerSend.status === 409, 'Seller could send after listing deletion');
+
+  const rollbackListing = await dbRun(
+    'INSERT INTO listings (user_id, title, description, category, price, condition, delivery_mode, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [secondSeller.body.user.id, 'Rollback Delete Fixture', 'Rollback deletion fixture', 'Other', 35, 'Good', 'pickup', 'Campus']
+  );
+  const rollbackConversation = await dbRun(
+    `INSERT INTO conversations
+     (listing_id, listing_title_snapshot, buyer_id, seller_id, read_only, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 0, ?, ?)`,
+    [
+      rollbackListing.lastID,
+      'Rollback Delete Fixture',
+      buyer.body.user.id,
+      secondSeller.body.user.id,
+      '2026-01-11T12:00:00.000Z',
+      '2026-01-11T12:05:00.000Z'
+    ]
+  );
+  await dbRun(
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at) VALUES (?, ?, ?, ?)',
+    [rollbackConversation.lastID, buyer.body.user.id, 'Rollback history message', '2026-01-11T12:01:00.000Z']
+  );
+
+  const rollbackListingBefore = await dbGet(
+    'SELECT id, title FROM listings WHERE id = ?',
+    [rollbackListing.lastID]
+  );
+  const rollbackConversationBefore = await dbGet(
+    'SELECT listing_id, read_only, listing_title_snapshot, updated_at FROM conversations WHERE id = ?',
+    [rollbackConversation.lastID]
+  );
+  const rollbackMessagesBefore = await dbAll(
+    'SELECT id, conversation_id, sender_id, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id',
+    [rollbackConversation.lastID]
+  );
+
+  await dbRun(`
+    CREATE TRIGGER reject_transaction_listing_delete
+    BEFORE DELETE ON listings
+    WHEN OLD.title = 'Rollback Delete Fixture'
+    BEGIN
+      SELECT RAISE(FAIL, 'forced listing deletion test failure');
+    END
+  `);
+  const rollbackDelete = await request(`/api/listings/${rollbackListing.lastID}`, {
+    method: 'DELETE',
+    headers: authHeader(secondSeller.body.token)
+  });
+  assert(rollbackDelete.status === 500, 'Forced listing deletion failure did not return HTTP 500');
+  await dbRun('DROP TRIGGER reject_transaction_listing_delete');
+
+  const rollbackListingAfter = await dbGet(
+    'SELECT id, title FROM listings WHERE id = ?',
+    [rollbackListing.lastID]
+  );
+  assert(rollbackListingAfter, 'Listing deletion rollback removed the listing');
+  assert(JSON.stringify(rollbackListingAfter) === JSON.stringify(rollbackListingBefore),
+    'Listing deletion rollback changed the listing fields');
+
+  const rollbackConversationAfter = await dbGet(
+    'SELECT listing_id, read_only, listing_title_snapshot, updated_at FROM conversations WHERE id = ?',
+    [rollbackConversation.lastID]
+  );
+  assert(rollbackConversationAfter.listing_id === rollbackListing.lastID,
+    'Listing deletion rollback lost the listing reference');
+  assert(rollbackConversationAfter.read_only === rollbackConversationBefore.read_only,
+    'Listing deletion rollback changed the conversation read-only state');
+  assert(rollbackConversationAfter.listing_title_snapshot === rollbackConversationBefore.listing_title_snapshot,
+    'Listing deletion rollback changed the conversation title snapshot');
+  assert(rollbackConversationAfter.updated_at === rollbackConversationBefore.updated_at,
+    'Listing deletion rollback changed conversation updated_at');
+
+  const rollbackMessagesAfter = await dbAll(
+    'SELECT id, conversation_id, sender_id, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id',
+    [rollbackConversation.lastID]
+  );
+  assert(JSON.stringify(rollbackMessagesAfter) === JSON.stringify(rollbackMessagesBefore),
+    'Listing deletion rollback changed existing message history');
+
   const sellerOwnDelete = await request(`/api/listings/${ownCreate.body.listing.id}`, {
     method: 'DELETE',
     headers: authHeader(seller.body.token)
   });
   assert(sellerOwnDelete.status === 200, 'Seller could not delete own listing');
+
+  const deletedConversationDetail = await request(`/api/conversations/${concurrentConversationId}`, {
+    headers: authHeader(buyer.body.token)
+  });
+  assert(deletedConversationDetail.status === 200, 'Buyer could not read deleted-listing conversation history');
+  assert(deletedConversationDetail.body.conversation.listing_id === null,
+    'Deleted-listing conversation retained a listing ID');
+  assert(deletedConversationDetail.body.conversation.listing_title === ownCreate.body.listing.title ||
+    deletedConversationDetail.body.conversation.listing_title === 'Updated Seller Item',
+    'Deleted-listing conversation lost the title snapshot');
+  assert(deletedConversationDetail.body.conversation.read_only === true,
+    'Deleted-listing conversation was not read-only');
+
+  const deletedConversationSellerDetail = await request(`/api/conversations/${concurrentConversationId}`, {
+    headers: authHeader(seller.body.token)
+  });
+  assert(deletedConversationSellerDetail.status === 200,
+    'Seller could not read deleted-listing conversation history');
+
+  const deletedConversationSend = await request(
+    `/api/conversations/${concurrentConversationId}/messages`,
+    {
+      method: 'POST',
+      headers: authHeader(buyer.body.token),
+      body: { content: 'Cannot send after deletion' }
+    }
+  );
+  assert(deletedConversationSend.status === 409,
+    'Deleted-listing conversation accepted a message');
 
   const upgradedCannotClaimBuyerCreate = await request('/api/listings', {
     method: 'POST',
